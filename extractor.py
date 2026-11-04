@@ -9,6 +9,7 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -47,6 +48,17 @@ def json_write(path: Path, data):
     temp = path.with_name(path.name + '.tmp')
     temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
     temp.replace(path)
+
+
+def set_runtime_phase(out: Path, phase: str, message: str):
+    """Publish a human-readable, per-process status for the watchdog.
+
+    This stores no cookies, authentication data, URLs with secrets or browser state.
+    """
+    json_write(out / 'runtime_status.json', {
+        'pid': os.getpid(), 'phase': phase, 'message': message, 'at': now(),
+    })
+    LOG.info('ETAPA %s: %s', phase, message)
 
 
 def slug(s: str, limit=72):
@@ -555,6 +567,7 @@ def main_cli():
     file_handler=logging.FileHandler(out/'execution.log',encoding='utf-8')
     file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
     LOG.addHandler(file_handler)
+    set_runtime_phase(out, 'preparando', 'Leyendo catálogo y comprobando avance anterior')
     seed={}
     if args.seed_html:
         seed=seed_from_html(Path(args.seed_html).read_text(encoding='utf-8-sig'))
@@ -577,6 +590,7 @@ def main_cli():
         LOG.error('Falta Playwright: pip install -r requirements.txt && python -m playwright install chromium')
         raise SystemExit(2)
 
+    set_runtime_phase(out, 'cargando_estado', 'Cargando páginas ya guardadas sin descargarlas de nuevo')
     state_path=out/'crawl_state.json'
     state=json.loads(state_path.read_text(encoding='utf-8')) if state_path.exists() else {'visited':{},'discovered':{},'created_at':now()}
     pages={}
@@ -595,18 +609,21 @@ def main_cli():
     skip_data=json.loads(skip_path.read_text(encoding='utf-8')) if skip_path.exists() else {}
     skip_keys=set(skip_data.keys()) if isinstance(skip_data,dict) else set(skip_data)
     inflight_path=out/'inflight_page.json'
+    set_runtime_phase(out, 'abriendo_chrome', 'Iniciando Chromium con el perfil local; cierra instancias anteriores del extractor si se bloquea')
 
     with sync_playwright() as pw:
         context=pw.chromium.launch_persistent_context(args.profile_dir,headless=args.headless,
                             viewport={'width':1365,'height':900},accept_downloads=False,locale='en-US')
         page=context.pages[0] if context.pages else context.new_page()
         page.set_default_timeout(15000)
+        set_runtime_phase(out, 'abriendo_google_skills', 'Abriendo la página inicial para comprobar la sesión')
         if args.login_only or args.login_if_needed:
             page.goto(START,wait_until='domcontentloaded',timeout=60000)
             page.wait_for_timeout(1600)
             if args.login_only or not has_authenticated_session(page):
                 print('\nGoogle Skills: inicia sesión en el navegador abierto si quieres extraer contenido de tu cuenta.')
-                print('Cuando hayas terminado de iniciar sesión, pulsa ENTER aquí para continuar la extracción.\n')
+                print('Cuando hayas terminado de iniciar sesión, pulsa ENTER aquí para continuar la extracción.\n', flush=True)
+                set_runtime_phase(out, 'esperando_login', 'Acción del usuario requerida: iniciar sesión en Chrome y pulsar ENTER en la consola')
                 try: input()
                 except EOFError: LOG.warning('Sin consola interactiva; se continúa con recursos públicos')
                 page.wait_for_timeout(1000)
@@ -614,6 +631,7 @@ def main_cli():
                     LOG.warning('No se confirmó sesión iniciada. Algunas lecciones podrían quedar inaccesibles.')
             if args.login_only:
                 context.close();return
+        set_runtime_phase(out, 'recorriendo_paginas', f'Retomando el recorrido; {len(pages)} páginas recuperadas del disco')
         seen_now=set(); attempts=0
         while targets and attempts<args.max_pages:
             u=targets.popleft();key=canonical(u)
@@ -708,11 +726,13 @@ def main_cli():
             inflight_path.unlink(missing_ok=True)
             if args.delay:time.sleep(args.delay)
         if args.download_images:
+            set_runtime_phase(out, 'descargando_imagenes', 'Reutilizando imágenes descargadas y buscando las pendientes')
             LOG.info('Descargando imágenes de fuentes permitidas...')
             download_images(context,pages,out,args.delay)
         context.close()
 
     inflight_path.unlink(missing_ok=True)
+    set_runtime_phase(out, 'procesando_videos', 'Procesando videos, subtítulos, Whisper y fotogramas')
     video_results=[] if args.skip_video else process_videos(pages,out,frames=args.frames,whisper=args.whisper,
                                  model=args.whisper_model,keep_videos=args.keep_videos,
                                  frame_seconds=args.frame_seconds,frame_method=args.frame_method)
@@ -746,6 +766,7 @@ def main_cli():
     json_write(out/'coverage_report.json',report)
     print(f"Terminado. Páginas OK: {done}; con incidencias: {len(failed)}; videos: {len(video_results)}; transcripciones: {report['youtube_transcripts_obtained']}; pendientes: {len(unvisited)}")
     print('Informe:',out/'coverage_report.json')
+    set_runtime_phase(out, 'finalizado', 'Extracción terminada; revisar coverage_report.json')
 
 
 if __name__ == '__main__':main_cli()
