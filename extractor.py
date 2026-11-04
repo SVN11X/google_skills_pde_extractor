@@ -352,36 +352,16 @@ def download_images(context, pages: dict, out: Path, sleep: float):
     return entries
 
 
-def youtube_dlp_opts():
-    # yt-dlp >= 2025.11.12 requiere un runtime JS y EJS para recuperar
-    # de manera fiable muchos formatos de YouTube. No eludir restricciones.
-    local = Path(__file__).resolve().parent / '.tools' / 'deno' / ('deno.exe' if sys.platform == 'win32' else 'deno')
-    deno = str(local) if local.is_file() else shutil.which('deno')
-    opts = {'remote_components': []}
-    if deno:
-        opts['js_runtimes'] = {'deno': {'path': deno}}
-    return opts
-
-
 def run_yt_dlp_subtitles(url: str, folder: Path):
-    try:
-        import yt_dlp
-    except ImportError:
-        return 'yt-dlp no instalado'
-    folder.mkdir(parents=True,exist_ok=True)
-    opts={
-        'skip_download':True,'writesubtitles':True,'writeautomaticsub':True,
-        'subtitleslangs':['en.*','es.*'], 'subtitlesformat':'vtt/srt/best',
-        'outtmpl':str(folder/'%(id)s.%(ext)s'),'quiet':True, 'no_warnings':True,
-        'ignoreerrors':False,'noplaylist':True,'retries':2,'fragment_retries':2,
-        'socket_timeout':20,'sleep_interval_requests':1.0,
-        **youtube_dlp_opts()
-    }
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:ydl.download([url])
-    except Exception as exc:
-        return f'{type(exc).__name__}: {str(exc)[:400]}'
-    return None
+    """Try subtitles with the verified yt-dlp CLI and a hard per-video timeout."""
+    from yt_dlp_runner import execute
+    folder.mkdir(parents=True, exist_ok=True)
+    attempt = execute([
+        '--skip-download', '--write-subs', '--write-auto-subs',
+        '--sub-langs', 'en.*,es.*', '--sub-format', 'vtt/srt/best',
+        '--output', str(folder / '%(id)s.%(ext)s'), url,
+    ], timeout=120)
+    return None if attempt.ok else attempt.reason[:500]
 
 
 def yt_fetch_transcript(video_id: str, folder:Path):
@@ -428,22 +408,25 @@ def vtt_to_text(folder:Path):
     return True
 
 
-def download_video(url: str, folder:Path, *, audio_only=False):
-    try:import yt_dlp
-    except ImportError:return None,'yt-dlp no instalado'
-    try:
-        opts={'format':'bestaudio[ext=m4a]/bestaudio/best' if audio_only else 'bv*[height<=720]+ba/b[height<=720]/best',
-              'outtmpl':str(folder/'source.%(ext)s'),'noplaylist':True,
-              'quiet':True,'no_warnings':True,'retries':2,'fragment_retries':2,
-              'socket_timeout':30,'continuedl':True,'merge_output_format':'mp4',
-              'sleep_interval_requests':1.5,
-              **youtube_dlp_opts()}
-        ffmpeg=resolve_ffmpeg()
-        if ffmpeg:opts['ffmpeg_location']=ffmpeg
-        with yt_dlp.YoutubeDL(opts) as ydl:ydl.download([url])
-        files=[f for f in folder.glob('source.*') if f.suffix.lower() not in ('.part','.ytdl')]
-        return files[0] if files else None, None if files else 'No se descargó archivo'
-    except Exception as exc:return None,f'{type(exc).__name__}: {str(exc)[:300]}'
+def download_video(url: str, folder: Path, *, audio_only=False):
+    """Bound each download. Failure never stops the remaining video queue."""
+    from yt_dlp_runner import execute
+    folder.mkdir(parents=True, exist_ok=True)
+    fmt = 'bestaudio[ext=m4a]/bestaudio/best' if audio_only else 'bv*[height<=720]+ba/b[height<=720]/best'
+    options = ['--format', fmt, '--output', str(folder / 'source.%(ext)s'),
+               '--continue', '--merge-output-format', 'mp4']
+    ffmpeg = resolve_ffmpeg()
+    if ffmpeg:
+        options += ['--ffmpeg-location', ffmpeg]
+    attempt = execute(options + [url], timeout=420)
+    # Treat only a validated complete media file as successful.
+    candidates = [f for f in folder.glob('source.*')
+                  if f.is_file() and f.suffix.lower() not in ('.part', '.ytdl', '.json', '.temp')
+                  and f.stat().st_size > 1024]
+    media = max(candidates, key=lambda f: f.stat().st_size, default=None)
+    if not attempt.ok:
+        return None, attempt.reason[:500]
+    return (media, None) if media else (None, 'yt-dlp finalizó sin generar un archivo multimedia')
 
 
 def run_whisper(audio:Path,folder:Path,model_name:str):
@@ -513,6 +496,9 @@ def process_videos(pages:dict,out:Path,frames=False,whisper=False,model='small',
     for p in pages.values():
         for vid in p.get('videos',[]):videos.setdefault(vid['id'],set()).add(p['url'])
     results=[]
+    from yt_dlp_runner import project_python, deno_path
+    LOG.info('yt-dlp ejecutará: %s; Deno: %s; sin configuración ni cookies heredadas',
+             project_python(), deno_path() or 'NO DETECTADO')
     for i,(vid,sources) in enumerate(videos.items(),1):
         LOG.info('Procesando video %s/%s: %s',i,len(videos),vid)
         folder=out/'videos'/vid;folder.mkdir(parents=True,exist_ok=True)
@@ -558,7 +544,8 @@ def process_videos(pages:dict,out:Path,frames=False,whisper=False,model='small',
         results.append(entry)
         # Guardar avance también si se interrumpe la extracción por videos largos.
         json_write(out/'videos_manifest.json',results)
-        LOG.info('Video %s/%s: %s, %d frames',i,len(videos),entry['transcript'],frame_count)
+        LOG.info('Video %s/%s: transcripción=%s, capturas=%d, problemas=%s',
+                 i, len(videos), entry['transcript'], frame_count, len(log))
     return results
 
 
