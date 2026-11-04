@@ -808,13 +808,17 @@ def main_cli():
             'skipped_hung_urls':list(skip_data.values()) if isinstance(skip_data,dict) else skip_data,
             'pending_discovered_urls':unvisited,'issues':failed,'youtube_videos_found':len(ids_found),
             'youtube_transcripts_obtained':sum(x['transcript']=='ok' for x in video_results),
+            'youtube_transcripts_pending':sum(x['transcript']!='ok' for x in video_results),
+            'completion_status':'partial' if unvisited or failed or any(x['transcript']!='ok' for x in video_results) else 'complete',
             'frames_obtained':sum(x['frames'] for x in video_results),
             'youtube_videos_with_frames':sum(x['frames']>0 for x in video_results),
             'youtube_videos_without_transcription':[x['url'] for x in video_results if x['transcript']!='ok'],
             'youtube_videos_without_frames':[x['url'] for x in video_results if x['frames']<1],
             'note':'Un archivo inicial no demuestra cobertura total. Ver issues y pending_discovered_urls.'}
     json_write(out/'coverage_report.json',report)
-    print(f"Terminado. Páginas OK: {done}; con incidencias: {len(failed)}; videos: {len(video_results)}; transcripciones: {report['youtube_transcripts_obtained']}; pendientes: {len(unvisited)}")
+    print(f"Terminado. Páginas OK: {done}; con incidencias: {len(failed)}; videos: {len(video_results)}; transcripciones: {report['youtube_transcripts_obtained']}; transcripciones faltantes: {report['youtube_transcripts_pending']}; URLs pendientes: {len(unvisited)}")
+    if report['completion_status'] != 'complete':
+        print('[PARCIAL] Faltan transcripciones o páginas. Ver coverage_report.json. Para recuperar Whisper desde medios locales ejecuta RECUPERAR_TRANSCRIPCIONES_WINDOWS.bat.')
     print('Informe:',out/'coverage_report.json')
     set_runtime_phase(out, 'finalizado', 'Extracción terminada; revisar coverage_report.json')
 

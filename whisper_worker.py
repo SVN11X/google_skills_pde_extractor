@@ -49,6 +49,8 @@ def main() -> int:
     try:
         transcribe(args.audio, args.folder, args.model)
     except Exception as exc:
+        if isinstance(exc, ModuleNotFoundError) and exc.name == 'av':
+            print('Falta PyAV en el Python aislado de Whisper. Ejecuta RECUPERAR_TRANSCRIPCIONES_WINDOWS.bat para instalarlo en .venv.', flush=True)
         print(f'Whisper CPU no pudo transcribir: {type(exc).__name__}: {exc}', flush=True)
         return 1
     return 0

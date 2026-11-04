@@ -5,3 +5,6 @@ yt-dlp[default]>=2026.3.1
 youtube-transcript-api>=1.0,<2
 imageio-ffmpeg>=0.5,<1
 faster-whisper>=1.0,<2
+
+# Whisper worker uses PyAV to decode media; install into the local venv, not only globally.
+av>=11,<17
