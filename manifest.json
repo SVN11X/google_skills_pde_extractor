@@ -1,0 +1,17 @@
+{
+  "project": "Google Skills PDE extractor",
+  "version": "1.1.0",
+  "path": "https://www.skills.google/paths/16",
+  "seed_count": 13,
+  "status": "Packaged and tested locally; live deep extraction not executed against user authenticated session",
+  "tests": "5 passed offline; interval + scene FFmpeg tested with synthetic video",
+  "features": [
+    "one-click install and crawl",
+    "login-on-demand same execution",
+    "image extraction",
+    "page screenshots",
+    "YouTube transcript API and yt-dlp subtitles",
+    "optional Whisper fallback included in --all",
+    "FFmpeg interval and scene captures in --all"
+  ]
+}

@@ -1,0 +1,22 @@
+GOOGLE SKILLS - PROFESSIONAL DATA ENGINEER
+EXTRACCION EN UNA SOLA EJECUCION (WINDOWS)
+
+1. Descomprime TODO el ZIP.
+2. Entra a la carpeta google_skills_pde_extractor.
+3. Haz doble clic en EXTRAER_TODO_WINDOWS.bat.
+4. Si la consola te lo solicita, inicia sesion en la ventana de Google Skills y pulsa ENTER. Es parte de la MISMA ejecucion.
+5. El programa sigue solo y procesa cursos, laboratorios, articulos, imagenes, transcripciones y capturas de los videos de YouTube accesibles.
+
+REQUISITO INICIAL: Python 3.11+ instalado en el PC. Se recomienda Python 3.12.
+No necesitas instalar FFmpeg por separado: imageio-ffmpeg se instala automaticamente.
+
+SALIDA: export_pde\
+  coverage_report.json   cobertura, incidencias y recursos pendientes
+  execution.log          registro de ejecucion
+  pages\                 textos y capturas de paginas
+  assets\images\         imagenes descargadas
+  videos\ID\transcript.txt
+  videos\ID\frames\interval\
+  videos\ID\frames\scene\
+
+El script usa tu propia sesion y no evita restricciones de acceso o DRM. Algunos videos o lecciones podrian no estar disponibles y apareceran registrados como incidencias. Si se interrumpe, vuelve a ejecutar el mismo BAT para reintentar.

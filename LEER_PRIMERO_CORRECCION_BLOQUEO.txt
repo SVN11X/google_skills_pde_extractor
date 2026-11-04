@@ -1,0 +1,33 @@
+HOTFIX - GOOGLE SKILLS PDE - NOVIEMBRE 2026
+
+SINTOMA:
+El log se quedó en Página 624 (BigQuery ML inference engine...) a las 10:58.
+Chrome puede mostrar la página pero el proceso queda esperando una operación del navegador.
+
+DETENER LA EJECUCIÓN BLOQUEADA:
+1. Volver a la ventana de CMD/PowerShell que ejecutó el .bat anterior.
+2. Ctrl+C. Si pregunta "Terminate batch job (Y/N)?", responder Y.
+3. No eliminar export_pde, .venv, .tools ni .google_skills_browser.
+
+INSTALAR EL PARCHE:
+1. Extraer los archivos de este ZIP.
+2. Copiar los archivos DEL INTERIOR de la carpeta google_skills_pde_extractor
+   a tu carpeta google_skills_pde_extractor ORIGINAL (sobrescribir extractor.py).
+3. NO mover ni copiar tu carpeta export_pde al ZIP; debe permanecer donde está.
+4. Ejecutar CONTINUAR_SEGURO_WINDOWS.bat (no el viejo CONTINUAR_TODO_WINDOWS.bat).
+
+CAMBIOS:
+- El modo --all ya no rastrea en cascada la documentación cloud.google.com.
+  Los enlaces públicos siguen guardados como referencias; para incluir los artículos
+  públicos completos se requiere ejecutar después con --follow-public-articles.
+- HTML y scroll obtenidos con operaciones Playwright de tiempo limitado.
+- Supervisor externo vigila el registro. Si una página no avanza durante 210 s,
+  finaliza el proceso que inició, registra la URL omitida y reanuda sin borrar datos.
+- Las transcripciones y capturas de video se procesan en la misma ejecución.
+- Los videos que requieran muchas operaciones de Whisper tienen 1 hora máxima sin
+  novedades en el registro antes de activar el supervisor.
+- Saltos por bloqueo documentados en export_pde/skip_urls.json y coverage_report.json.
+
+IMPORTANTE:
+No hay garantía del 100%% en medios restringidos o inaccesibles. No se eluden
+protecciones, paywalls ni restricciones de cuenta.

@@ -1,0 +1,7 @@
+beautifulsoup4>=4.12,<5
+markdownify>=0.13,<2
+playwright>=1.49,<2
+yt-dlp[default]>=2026.3.1
+youtube-transcript-api>=1.0,<2
+imageio-ffmpeg>=0.5,<1
+faster-whisper>=1.0,<2

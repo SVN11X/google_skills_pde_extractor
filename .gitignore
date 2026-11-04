@@ -1,0 +1,5 @@
+.venv/
+.google_skills_browser/
+export_pde/
+**/__pycache__/
+*.pyc

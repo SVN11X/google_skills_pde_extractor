@@ -1,0 +1,24 @@
+{
+  "path": "https://www.skills.google/paths/16",
+  "status": "seed_only",
+  "updated_at": "2026-11-04T00:41:20+00:00",
+  "seed_activity_count": 13,
+  "pages_successful": 0,
+  "pages_visited": 0,
+  "pending_discovered_urls": [
+    "https://www.skills.google/focuses/2794?parent=catalog&path=16",
+    "https://www.skills.google/paths/16/course_templates/72",
+    "https://www.skills.google/paths/16/course_templates/1157",
+    "https://www.skills.google/paths/16/course_templates/54",
+    "https://www.skills.google/paths/16/course_templates/53",
+    "https://www.skills.google/paths/16/course_templates/52",
+    "https://www.skills.google/paths/16/course_templates/218",
+    "https://www.skills.google/paths/16/course_templates/229",
+    "https://www.skills.google/paths/16/course_templates/264",
+    "https://www.skills.google/paths/16/course_templates/624",
+    "https://www.skills.google/paths/16/course_templates/681",
+    "https://www.skills.google/paths/16/course_templates/1169",
+    "https://www.skills.google/paths/16/course_templates/1133"
+  ],
+  "note": "Solo inventario; cursos, laboratorios, imágenes internas y transcripciones aún no visitados."
+}

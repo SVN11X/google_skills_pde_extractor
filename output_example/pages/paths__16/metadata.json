@@ -1,0 +1,243 @@
+{
+  "url": "https://www.skills.google/paths/16",
+  "title": "Professional Data Engineer Certification",
+  "description": "Advance your career in data engineering and prepare for the Google Cloud Professional Data Engineer Certification exam with this program.",
+  "extracted_at": "2026-11-04T00:40:48+00:00",
+  "activities": [
+    {
+      "title": "A Tour of Google Cloud Hands-on Labs",
+      "url": "https://www.skills.google/focuses/2794?parent=catalog&path=16",
+      "description": "In this first hands-on lab you will access the Google Cloud console and use these basic Google Cloud features: Projects, Resources, IAM Users, Roles, Permissions, and APIs.",
+      "is_locked": false,
+      "id": 197739
+    },
+    {
+      "title": "Build a Certification Study Guide: PDE Exam Prep",
+      "url": "https://www.skills.google/paths/16/course_templates/72",
+      "description": "Learn how to use Gemini Notebook to create a personalized study guide for the Professional Data Engineer certification exam.\nYou'll review Gemini Notebook features, create a notebook in Gemini Notebook, and learn how to use a study guide to practice...",
+      "is_locked": false,
+      "id": 197740
+    },
+    {
+      "title": "Introduction to Data Engineering on Google Cloud",
+      "url": "https://www.skills.google/paths/16/course_templates/1157",
+      "description": "In this course, you learn about data engineering on Google Cloud, the roles and responsibilities of data engineers, and how those map to offerings provided by Google Cloud. You also learn about ways to address data engineering challenges.",
+      "is_locked": false,
+      "id": 197741
+    },
+    {
+      "title": "Build Data Lakes and Data Warehouses on Google Cloud",
+      "url": "https://www.skills.google/paths/16/course_templates/54",
+      "description": "While the traditional approaches of using data lakes and data warehouses can be effective, they have shortcomings, particularly in large enterprise environments. This course introduces the concept of a data lakehouse and the Google Cloud products used to create one....",
+      "is_locked": false,
+      "id": 197742
+    },
+    {
+      "title": "Build Batch Data Pipelines on Google Cloud",
+      "url": "https://www.skills.google/paths/16/course_templates/53",
+      "description": "In this intermediate course, you will learn to design, build, and optimize robust batch data pipelines on Google Cloud. Moving beyond fundamental data handling, you will explore large-scale data transformations and efficient workflow orchestration, essential for timely business intelligence and...",
+      "is_locked": false,
+      "id": 197743
+    },
+    {
+      "title": "Build Streaming Data Pipelines on Google Cloud",
+      "url": "https://www.skills.google/paths/16/course_templates/52",
+      "description": "In this course you will get hands-on in order to work through real-world challenges faced when building streaming data pipelines. The primary focus is on managing continuous, unbounded data with Google Cloud products.",
+      "is_locked": false,
+      "id": 197744
+    },
+    {
+      "title": "Serverless Data Processing with Dataflow: Foundations",
+      "url": "https://www.skills.google/paths/16/course_templates/218",
+      "description": "This course is part 1 of a 3-course series on Serverless Data Processing with Dataflow. In this first course, we start with a refresher of what Apache Beam is and its relationship with Dataflow. Next, we talk about the Apache...",
+      "is_locked": false,
+      "id": 197745
+    },
+    {
+      "title": "Serverless Data Processing with Dataflow: Develop Pipelines",
+      "url": "https://www.skills.google/paths/16/course_templates/229",
+      "description": "In this second installment of the Dataflow course series, we are going to be diving deeper on developing pipelines using the Beam SDK. We start with a review of Apache Beam concepts. Next, we discuss processing streaming data using windows,...",
+      "is_locked": false,
+      "id": 197746
+    },
+    {
+      "title": "Serverless Data Processing with Dataflow: Operations",
+      "url": "https://www.skills.google/paths/16/course_templates/264",
+      "description": "In the last installment of the Dataflow course series, we will introduce the components of the Dataflow operational model. We will examine tools and techniques for troubleshooting and optimizing pipeline performance. We will then review testing, deployment, and reliability best...",
+      "is_locked": false,
+      "id": 197747
+    },
+    {
+      "title": "Build a Data Warehouse with BigQuery",
+      "url": "https://www.skills.google/paths/16/course_templates/624",
+      "description": "Complete the intermediate Build a Data Warehouse with BigQuery skill badge course to demonstrate skills in the following: joining data to create new tables, troubleshooting joins, appending data with unions, creating date-partitioned tables, and working with JSON, arrays, and structs...",
+      "is_locked": false,
+      "id": 197748
+    },
+    {
+      "title": "Build a Data Mesh with Knowledge Catalog",
+      "url": "https://www.skills.google/paths/16/course_templates/681",
+      "description": "Complete the introductory Build a Data Mesh with Knowledge Catalog skill badge to demonstrate skills in the following: building a data mesh with Knowledge Catalog to facilitate data security, governance, and discovery on Google Cloud. You practice and test your...",
+      "is_locked": false,
+      "id": 197749
+    },
+    {
+      "title": "Boost Productivity with Gemini in BigQuery",
+      "url": "https://www.skills.google/paths/16/course_templates/1169",
+      "description": "This course explores Gemini in BigQuery, a suite of AI-driven features to assist data-to-AI workflow. These features include data exploration and preparation, code generation and troubleshooting, and workflow discovery and visualization. Through conceptual explanations, a practical use case, and hands-on...",
+      "is_locked": false,
+      "id": 197750
+    },
+    {
+      "title": "Work with Gemini Models in BigQuery",
+      "url": "https://www.skills.google/paths/16/course_templates/1133",
+      "description": "This course demonstrates how to use AI/ML models for generative AI tasks in BigQuery. Through a practical use case involving customer relationship management,  you learn the workflow of solving a business problem with Gemini models. To facilitate comprehension, the course...",
+      "is_locked": false,
+      "id": 197751
+    }
+  ],
+  "links": [
+    {
+      "url": "https://www.skills.google/paths/Professional Data Engineer Certification _ Google Skills_files/shapes-activities-chip-82e9b02395fa0c83cc0b38e6a323b23b865fe7de.svg",
+      "kind": "image",
+      "label": "Learning Path Icon",
+      "tag": "img"
+    },
+    {
+      "url": "https://www.skills.google/paths/Professional Data Engineer Certification _ Google Skills_files/shapes-activities-bbd699f18f1125385c6f6b83694bbbc41b8873ab.svg",
+      "kind": "image",
+      "label": "Learning Path Shape",
+      "tag": "img"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/select_active",
+      "kind": "link",
+      "label": "Start",
+      "tag": "ql-button"
+    },
+    {
+      "url": "https://cloud.google.com/learn/certification/data-engineer/",
+      "kind": "link",
+      "label": "the Google Cloud Professional Data Engineer exam.",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/focuses/2794?parent=catalog&path=16",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://cdn.qwiklabs.com/hallofmirrors/lab-activity-shape-chip_6497bf2298bff35931b545cbd8eb1c38f584c64ca69c06f8a94b4fa1ad0b7ffe.svg",
+      "kind": "image",
+      "label": "lab icon",
+      "tag": "img"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/72",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://cdn.qwiklabs.com/hallofmirrors/course-activity-shape-chip_3977dcf785dba8e3f7fe2eb53775d5487fd46788e23be3c17f6bec728bdf3007.svg",
+      "kind": "image",
+      "label": "course icon",
+      "tag": "img"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/1157",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/54",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/53",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/52",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/218",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/229",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/264",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/624",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/681",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/1169",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    },
+    {
+      "url": "https://www.skills.google/paths/16/course_templates/1133",
+      "kind": "link",
+      "label": "",
+      "tag": "a"
+    }
+  ],
+  "images": [
+    {
+      "url": "https://www.skills.google/paths/Professional Data Engineer Certification _ Google Skills_files/shapes-activities-chip-82e9b02395fa0c83cc0b38e6a323b23b865fe7de.svg",
+      "kind": "image",
+      "label": "Learning Path Icon",
+      "tag": "img"
+    },
+    {
+      "url": "https://www.skills.google/paths/Professional Data Engineer Certification _ Google Skills_files/shapes-activities-bbd699f18f1125385c6f6b83694bbbc41b8873ab.svg",
+      "kind": "image",
+      "label": "Learning Path Shape",
+      "tag": "img"
+    },
+    {
+      "url": "https://cdn.qwiklabs.com/hallofmirrors/lab-activity-shape-chip_6497bf2298bff35931b545cbd8eb1c38f584c64ca69c06f8a94b4fa1ad0b7ffe.svg",
+      "kind": "image",
+      "label": "lab icon",
+      "tag": "img"
+    },
+    {
+      "url": "https://cdn.qwiklabs.com/hallofmirrors/course-activity-shape-chip_3977dcf785dba8e3f7fe2eb53775d5487fd46788e23be3c17f6bec728bdf3007.svg",
+      "kind": "image",
+      "label": "course icon",
+      "tag": "img"
+    }
+  ],
+  "videos": [],
+  "text_length": 1178
+}
