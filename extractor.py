@@ -430,16 +430,26 @@ def download_video(url: str, folder: Path, *, audio_only=False):
 
 
 def run_whisper(audio:Path,folder:Path,model_name:str):
-    try:from faster_whisper import WhisperModel
-    except ImportError:return 'faster-whisper no instalado'
+    """Isolate Whisper native crashes; always use CPU INT8 (no CUDA/cuDNN)."""
+    from yt_dlp_runner import project_python
+    worker=Path(__file__).resolve().parent/'whisper_worker.py'
+    cmd=[project_python(), '-I', str(worker), str(audio.resolve()),
+         str(folder.resolve()), '--model', model_name]
+    LOG.info('Whisper local en CPU INT8: %s', audio.name)
     try:
-        model=WhisperModel(model_name,device='auto',compute_type='int8')
-        segments,info=model.transcribe(str(audio),beam_size=5, vad_filter=True)
-        items=[{'text':x.text.strip(),'start':x.start,'duration':x.end-x.start} for x in segments]
-        json_write(folder/'transcript.json',{'language':info.language,'segments':items,'method':'faster-whisper'})
-        (folder/'transcript.txt').write_text('\n'.join(f"[{e['start']:.1f}s] {e['text']}" for e in items)+'\n',encoding='utf-8')
-        return None
-    except Exception as exc:return f'{type(exc).__name__}: {str(exc)[:300]}'
+        result=subprocess.run(cmd, capture_output=True, text=True, errors='replace',
+                              timeout=1800, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return 'Whisper CPU superó 1800 segundos; se continuará con los demás videos'
+    except OSError as exc:
+        return f'No se pudo iniciar Whisper CPU: {type(exc).__name__}: {exc}'
+    if result.returncode:
+        error=(result.stderr or result.stdout or 'fallo del proceso nativo')[-650:]
+        return f'Whisper CPU (código {result.returncode}): {error}'
+    transcript=folder/'transcript.txt'
+    if not transcript.exists() or transcript.stat().st_size<=3:
+        return 'Whisper finalizó sin generar transcripción utilizable'
+    return None
 
 
 def resolve_ffmpeg():
@@ -510,6 +520,22 @@ def process_videos(pages:dict,out:Path,frames=False,whisper=False,model='small',
         # Necesitamos ambas modalidades si se solicitó --frame-method both.
         frame_sets=['interval','scene'] if frame_method=='both' else [frame_method]
         frames_complete=all(any((folder/'frames'/name if frame_method=='both' else folder/'frames').glob('frame_*.jpg')) for name in frame_sets) if frames else True
+        # Resume by media asset, not just by page. Do not redownload or
+        # reprocess a video when both requested outputs are already present.
+        if transcript_ok and frames_complete:
+            manifest_path=folder/'manifest.json'
+            try:
+                old_entry=json.loads(manifest_path.read_text(encoding='utf-8')) if manifest_path.exists() else {}
+            except (ValueError, OSError):
+                old_entry={}
+            entry={'id':vid, 'url':u, 'sources':sorted(sources), 'transcript':'ok',
+                   'frames':existing_frames, 'notes':old_entry.get('notes', []),
+                   'checked_at':now(), 'reused_from_disk':True}
+            results.append(entry)
+            json_write(out/'videos_manifest.json',results)
+            LOG.info('Video %s/%s: completado anteriormente; transcripción=ok, capturas=%d',
+                     i, len(videos), existing_frames)
+            continue
         if not transcript_ok and (list(folder.glob('*.vtt')) or list(folder.glob('*.srt'))):
             vtt_to_text(folder)
             transcript_ok=existing_transcript.exists() and existing_transcript.stat().st_size>3
@@ -537,7 +563,12 @@ def process_videos(pages:dict,out:Path,frames=False,whisper=False,model='small',
             err=extract_frames(media,folder,frame_seconds,frame_method)
             if err:log.append('frames: '+err)
         frame_count=len(list((folder/'frames').rglob('frame_*.jpg')))
-        if media and not keep_videos:media.unlink(missing_ok=True)
+        # Keep downloaded media when any requested output is still missing:
+        # a new run can retry Whisper/FFmpeg without downloading it again.
+        frames_now_complete=(all(any((folder/'frames'/name if frame_method=='both' else folder/'frames').glob('frame_*.jpg'))
+                                 for name in frame_sets) if frames else True)
+        if media and not keep_videos and (transcript_ok or not whisper) and frames_now_complete:
+            media.unlink(missing_ok=True)
         entry={'id':vid,'url':u,'sources':sorted(sources),'transcript':'ok' if transcript_ok else 'unavailable',
                'frames':frame_count,'notes':log,'checked_at':now()}
         json_write(folder/'manifest.json',entry)
