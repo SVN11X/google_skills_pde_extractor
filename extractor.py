@@ -56,7 +56,8 @@ def set_runtime_phase(out: Path, phase: str, message: str):
     This stores no cookies, authentication data, URLs with secrets or browser state.
     """
     json_write(out / 'runtime_status.json', {
-        'pid': os.getpid(), 'phase': phase, 'message': message, 'at': now(),
+        'pid': os.getpid(), 'run_id': os.environ.get('PDE_RUN_ID', ''),
+        'phase': phase, 'message': message, 'at': now(),
     })
     LOG.info('ETAPA %s: %s', phase, message)
 
@@ -233,6 +234,40 @@ def extract_page(html: str, url: str, *, follow_articles=False, extra_resources=
             'activities':list(acts.values()),'links':link_items,'images':images,
             'videos':[{'id':v,'url':'https://www.youtube.com/watch?v='+v} for v in videos],
             'markdown':markdown,'text_length':len(safe_main.get_text(' ',strip=True))}
+
+
+
+def plan_resume_queue(seed: dict, state: dict, pages: dict, follow_articles: bool = False):
+    """Build a finite, deduplicated queue from saved progress and the seed.
+
+    Saved course pages can reference one another. Scheduling each canonical URL
+    once avoids an infinite loop of already-visited course links on resume.
+    """
+    queue = deque()
+    enqueued = set()
+
+    def enqueue(url):
+        if not isinstance(url, str):
+            return False
+        if not (is_learning_url(url) or (follow_articles and is_public_article_url(url))):
+            return False
+        key = canonical(url)
+        if key in enqueued:
+            return False
+        enqueued.add(key)
+        queue.append(url)
+        return True
+
+    enqueue(START)
+    for activity in seed.get('activities', []):
+        enqueue(activity.get('url'))
+    for address in state.get('discovered', {}).values():
+        enqueue(address)
+    # Rebuild links from saved content once, not every time we skip a visited page.
+    for saved_page in pages.values():
+        for activity in saved_page.get('activities', []):
+            enqueue(activity.get('url'))
+    return queue, enqueue
 
 
 def seed_from_html(html: str) -> dict:
@@ -600,11 +635,10 @@ def main_cli():
             # Excluir páginas externas legadas del inventario actual (sin borrarlas).
             if p.get('url') and is_learning_url(p['url']):pages[canonical(p['url'])]=p
         except Exception:pass
-    targets=deque([START]+[x['url'] for x in seed.get('activities',[])])
-    for address in list(state.get('discovered',{}).values()):
-        if is_learning_url(address) or (args.follow_public_articles and is_public_article_url(address)):
-            targets.append(address)
     state.setdefault('visited',{});state.setdefault('discovered',{})
+    targets, enqueue = plan_resume_queue(seed, state, pages, args.follow_public_articles)
+    LOG.info('Cola reconstruida: %d URLs únicas, %d visitas previas, %d páginas locales',
+             len(targets), len(state['visited']), len(pages))
     skip_path=out/'skip_urls.json'
     skip_data=json.loads(skip_path.read_text(encoding='utf-8')) if skip_path.exists() else {}
     skip_keys=set(skip_data.keys()) if isinstance(skip_data,dict) else set(skip_data)
@@ -632,21 +666,17 @@ def main_cli():
             if args.login_only:
                 context.close();return
         set_runtime_phase(out, 'recorriendo_paginas', f'Retomando el recorrido; {len(pages)} páginas recuperadas del disco')
-        seen_now=set(); attempts=0
+        seen_now=set(); attempts=0; skipped_previous=0
         while targets and attempts<args.max_pages:
             u=targets.popleft();key=canonical(u)
-            if not (is_learning_url(u) or (args.follow_public_articles and is_public_article_url(u))):
+            if key in seen_now or key in skip_keys:
                 continue
-            if key in seen_now or key in skip_keys:continue
+            seen_now.add(key)  # Includes previously visited pages; never requeue their links.
             prior=state['visited'].get(key,{}).get('status')
             if (prior=='ok' and not args.refresh) or (prior and prior!='ok' and not args.retry_failed and not args.refresh):
-                if key in pages:
-                    for child in pages[key].get('activities',[]):
-                        child_url=child['url']
-                        if is_learning_url(child_url) or (args.follow_public_articles and is_public_article_url(child_url)):
-                            targets.append(child_url)
+                skipped_previous+=1
                 continue
-            seen_now.add(key);attempts+=1
+            attempts+=1
             json_write(inflight_path, {'url':u, 'key':key, 'started_at':now()})
             LOG.info('Página %d/%d: %s',attempts,args.max_pages,u)
             record={'url':u,'checked_at':now(),'status':'error'}
@@ -714,7 +744,7 @@ def main_cli():
                             if not (is_learning_url(address) or args.follow_public_articles and is_public_article_url(address)):continue
                             dest=canonical(address)
                             state['discovered'][dest]=address
-                            if dest not in seen_now:targets.append(address)
+                            enqueue(address)
                     if status in (200,301,302) and p.get('title','').lower().startswith('sign in'):
                         record['status']='auth_required';record['error']='Sitio solicita inicio de sesión'
             except (Exception,) as exc:
@@ -725,6 +755,8 @@ def main_cli():
             json_write(state_path,state)
             inflight_path.unlink(missing_ok=True)
             if args.delay:time.sleep(args.delay)
+        LOG.info('Recorrido finalizado: %d visitas nuevas, %d páginas previas reutilizadas, %d URLs únicas comprobadas',
+                 attempts, skipped_previous, len(seen_now))
         if args.download_images:
             set_runtime_phase(out, 'descargando_imagenes', 'Reutilizando imágenes descargadas y buscando las pendientes')
             LOG.info('Descargando imágenes de fuentes permitidas...')

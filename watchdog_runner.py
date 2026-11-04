@@ -123,6 +123,9 @@ def read_new_lines(path, previous_size):
 
 
 def phase_from_log(line):
+    stage = re.search(r'\bETAPA ([a-z_]+):', line)
+    if stage:
+        return stage.group(1)
     if re.search(r'\bPágina \d+/', line):
         return 'recorriendo_paginas'
     if 'Descargando imágenes' in line or 'Imágenes ' in line:
@@ -143,7 +146,12 @@ def run():
         start_size = LOG.stat().st_size if LOG.exists() else 0
         STATUS.unlink(missing_ok=True)  # evitar confundir fases de ejecuciones anteriores
         command = [sys.executable, '-u', str(ROOT / 'extractor.py'), *flags]
-        kwargs = {'cwd': str(ROOT)}
+        # On Windows a venv python.exe may launch a second interpreter with a
+        # different PID. A per-attempt ID ties status updates to this process tree.
+        run_id = f'{os.getpid()}-{time.time_ns()}-{restart}'
+        env = os.environ.copy()
+        env['PDE_RUN_ID'] = run_id
+        kwargs = {'cwd': str(ROOT), 'env': env}
         if os.name != 'nt':
             kwargs['start_new_session'] = True
         print(f'\n[Intento {restart + 1}/{MAX_RESTARTS + 1}] Iniciando Python...', flush=True)
@@ -165,7 +173,7 @@ def run():
                         if found:
                             phase = found
                 status = json_load(STATUS, {})
-                if status.get('pid') == proc.pid and status.get('phase'):
+                if status.get('run_id') == run_id and status.get('phase'):
                     next_phase = status['phase']
                     if next_phase != phase:
                         phase = next_phase
