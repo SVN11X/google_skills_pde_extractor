@@ -3,3 +3,4 @@
 export_pde/
 **/__pycache__/
 *.pyc
+export_paths/

@@ -1,0 +1,3 @@
+# Una ruta por línea. Reemplaza o agrega rutas de Google Skills.
+# Cada ruta se almacena en export_paths/path_ID, sin mezclar sus archivos.
+https://www.skills.google/paths/16

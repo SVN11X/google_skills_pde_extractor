@@ -72,13 +72,13 @@ def page_key(url: str):
     return slug(p.path.strip('/').replace('/', '__'), 130) or 'path-16'
 
 
-def norm_url(value: str, origin: str = START) -> str | None:
+def norm_url(value: str, origin: str | None = None) -> str | None:
     if not value or not isinstance(value, str):
         return None
     value = value.strip()
     if value.startswith(('#', 'javascript:', 'data:', 'mailto:', 'tel:', 'blob:')):
         return None
-    url = urljoin(origin, value)
+    url = urljoin(origin or START, value)
     p = urlparse(url)
     if p.scheme not in ('http', 'https') or not p.hostname:
         return None
@@ -106,7 +106,12 @@ def is_learning_url(url: str) -> bool:
     # Los laboratorios internos utilizan IDs numéricos; excluir URLs falsas creadas por texto.
     if re.search(r'/labs/([^/]+)', p.path) and not re.search(r'/labs/\d+(?:/|$)', p.path):
         return False
-    return (p.path == '/paths/16' or any(x in p.path for x in COURSE_PATHS))
+    # Reject references explicitly belonging to a different learning path.
+    match = re.match(r'^/paths/(\d+)(?:/|$)', p.path)
+    current = urlparse(START).path.split('/')[-1]
+    if match and match.group(1) != current:
+        return False
+    return (p.path == urlparse(START).path or any(x in p.path for x in COURSE_PATHS))
 
 
 def is_public_article_url(url: str) -> bool:
@@ -182,7 +187,7 @@ def extract_page(html: str, url: str, *, follow_articles=False, extra_resources=
     has_modules = bool(soup.select('[modules]'))
     for el in soup.select('[modules], [lessons], [activities], script[type="application/ld+json"]'):
         # Prefer the actual path menu to sometimes-outdated JSON-LD course aliases.
-        if has_modules and el.name == 'script' and urlparse(url).path == '/paths/16':
+        if has_modules and el.name == 'script' and urlparse(url).path == urlparse(START).path:
             continue
         attrs = [el.get(a) for a in ('modules','lessons','activities') if el.get(a)]
         if el.name == 'script':attrs.append(el.string or el.get_text())
@@ -272,7 +277,7 @@ def plan_resume_queue(seed: dict, state: dict, pages: dict, follow_articles: boo
 
 def seed_from_html(html: str) -> dict:
     page=extract_page(html,START)
-    # The /paths/16 activity list is authoritative for this saved user's snapshot.
+    # The selected learning path activity list is authoritative for this snapshot.
     main=BeautifulSoup(html,'html.parser').select_one('main')
     ordered=[]
     for el in (main.select('[modules]') if main else []):
@@ -581,8 +586,10 @@ def process_videos(pages:dict,out:Path,frames=False,whisper=False,model='small',
 
 
 def main_cli():
+    global START
     ap=argparse.ArgumentParser(description='Extrae enlaces, cursos, texto, imágenes y videos públicos/accesibles de Google Skills PDE')
-    ap.add_argument('--out',default='export_pde',help='Carpeta de salida')
+    ap.add_argument('--out',default=None,help='Carpeta de salida (default: export_pde para /16; export_paths/path_ID para otras rutas)')
+    ap.add_argument('--path-url',default=START,help='URL de la ruta: https://www.skills.google/paths/NUMERO')
     ap.add_argument('--seed-html',help='HTML de la ruta guardado desde Chrome; opcional')
     ap.add_argument('--seed-file',default=str(Path(__file__).with_name('seed_catalog.json')))
     ap.add_argument('--offline-seed-only',action='store_true',help='Solo inventario desde HTML semilla, sin navegador ni red')
@@ -595,7 +602,7 @@ def main_cli():
     ap.add_argument('--page-screenshots',action='store_true',help='Capturar pantalla larga de cada página')
     ap.add_argument('--frames',action='store_true',help='Descargar videos accesibles para extraer fotogramas con FFmpeg')
     ap.add_argument('--whisper',action='store_true',help='Si faltan subtítulos, usar Faster-Whisper local con audio accesible')
-    ap.add_argument('--whisper-model',default='small')
+    ap.add_argument('--whisper-model',default='large-v3', help='Modelo de alta calidad (usa small o turbo para ahorro de recursos)')
     ap.add_argument('--keep-videos',action='store_true')
     ap.add_argument('--frame-seconds',type=int,default=10)
     ap.add_argument('--frame-method',choices=['interval','scene','both'],default='both')
@@ -606,6 +613,13 @@ def main_cli():
     ap.add_argument('--refresh',action='store_true',help='Volver a visitar URLs exitosas de una ejecución anterior')
     ap.add_argument('--skip-video',action='store_true',help='Solo inventariar URLs de video, no buscar subtítulos ni frames')
     args=ap.parse_args()
+    parsed = urlparse(args.path_url)
+    if parsed.scheme != 'https' or parsed.hostname != 'www.skills.google' or not re.fullmatch(r'/paths/\d+/?', parsed.path) or parsed.query or parsed.fragment:
+        ap.error('--path-url debe ser https://www.skills.google/paths/NUMERO')
+    START = BASE + parsed.path.rstrip('/')
+    path_id = START.rsplit('/', 1)[-1]
+    if args.out is None:
+        args.out = 'export_pde' if path_id == '16' else str(Path('export_paths') / ('path_' + path_id))
     if args.all:
         args.download_images = True
         args.page_screenshots = True
@@ -625,7 +639,12 @@ def main_cli():
     if args.seed_html:
         seed=seed_from_html(Path(args.seed_html).read_text(encoding='utf-8-sig'))
         json_write(out/'seed_catalog.json',seed)
-    elif Path(args.seed_file).exists():seed=json.loads(Path(args.seed_file).read_text(encoding='utf-8'))
+    elif args.seed_file and Path(args.seed_file).exists():
+        candidate=json.loads(Path(args.seed_file).read_text(encoding='utf-8'))
+        if candidate.get('source_url','').rstrip('/') == START:
+            seed=candidate
+        else:
+            LOG.warning('Semilla de otro path ignorada; se descubrirán las actividades desde %s', START)
     if seed:
         save_csv(out/'initial_catalog.csv',seed['activities'],['id','title','url','description','is_locked'])
         json_write(out/'initial_catalog.json',seed)
