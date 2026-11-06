@@ -223,12 +223,42 @@ def build(out: Path) -> dict:
                            'provenance': 'recovered_local_resource', 'ai_verified': False})
             resource_count += 1
 
+    # Deep Rise observations are a separate, partial provenance layer. Preserve
+    # the original extraction and its source links; never label this complete.
+    deep_manifest = read_json(out / 'rise_deep_manifest.json', {})
+    deep_chunks = 0
+    for url, evidence in sorted(deep_manifest.items() if isinstance(deep_manifest, dict) else []):
+        if not isinstance(evidence, dict):
+            continue
+        rel = evidence.get('content_file')
+        if not isinstance(rel, str) or not rel:
+            continue
+        actual = (out / rel).resolve()
+        if not actual.is_relative_to(out) or not actual.is_file() or actual.suffix != '.md':
+            continue
+        content = redact_signed_urls(actual.read_text(encoding='utf-8', errors='replace')).strip()
+        if not content:
+            continue
+        kind = 'rise_deep_observation' if evidence.get('kind') != 'quiz' else 'quiz_visible_preview'
+        for index, chunk in enumerate(split_paragraphs(content), 1):
+            corpus.append({'id': sha(f'{path_id}|deep|{url}|{index}|{chunk}'),
+                           'path_id': path_id, 'kind': kind,
+                           'source_scope': 'path_content',
+                           'title': f'Observación: {urlparse(url).path.rsplit("/", 1)[-1]}',
+                           'source_url': url, 'source_file': safe_relative(actual, out),
+                           'chunk_number': index, 'text': chunk,
+                           'resource_status': 'partial', 'verified_full_coverage': False,
+                           'provenance': 'visible_rise_state_not_full_coverage',
+                           'ai_verified': False})
+            deep_chunks += 1
+
     # Mark rather than delete cross-URL duplicate text: a learner or auditing
     # tool may need both source URLs even when content is identical.
     duplicate_first = {}
     duplicate_count = 0
     for chunk in corpus:
-        if chunk.get('kind') not in ('page', 'recovered_html_bundle', 'recovered_quiz', 'recovered_document'):
+        if chunk.get('kind') not in ('page', 'recovered_html_bundle', 'recovered_quiz', 'recovered_document',
+                                    'rise_deep_observation', 'quiz_visible_preview'):
             continue
         normalized = re.sub(r'\s+', ' ', chunk.get('text', '')).strip()
         if len(normalized) < 50:
@@ -265,6 +295,8 @@ def build(out: Path) -> dict:
              'hq_status': 'complete' if hq_video_count == len(videos) and videos else 'partial',
              'chunks': len(corpus), 'exact_duplicate_text_chunks': duplicate_count,
              'recovered_resource_chunks': resource_count,
+             'rise_deep_observation_chunks': deep_chunks,
+             'rise_deep_coverage': read_json(out / 'rise_deep_coverage_report.json', {}),
              'resource_coverage': read_json(out / 'resource_coverage_report.json', {}).get('resource_totals', {}),
              'hq_video_chunks': sum(c['provenance']=='whisper_hq' for c in corpus),
              'note': 'La calidad de ASR no se valida automáticamente. Conservar referencias al material original.'}
