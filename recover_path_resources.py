@@ -222,6 +222,24 @@ def find_bundle_urls(links: list[dict]) -> list[str]:
     return urls
 
 
+def live_bundle_urls(page) -> list[str]:
+    """Read iframe URLs from the loaded LMS DOM, retaining Rise lesson hashes.
+
+    The saved crawler links can be stale or omit the iframe on the first lesson.
+    Only the existing iframe src is used; no course or lesson discovery occurs.
+    """
+    urls = []
+    try:
+        elements = page.locator('ql-iframe[src], iframe[src]')
+        for i in range(min(elements.count(), 12)):
+            url = elements.nth(i).get_attribute('src') or ''
+            if is_training_html_url(url) and url not in urls:
+                urls.append(url)
+    except Exception:
+        pass
+    return urls
+
+
 def is_training_html_url(url: str) -> bool:
     """Some Google Skills *documents* are actually hosted HTML5 course chapters.
 
@@ -257,6 +275,14 @@ def capture_current_training_frame(page, allowed_urls: list[str], out: Path, fol
     try:
         page.wait_for_timeout(1200)
         frames = list(page.frames)
+        # The very first Rise lesson can mount its iframe after the LMS page
+        # reaches DOMContentLoaded. Retry only when the expected frame is absent;
+        # do not add delays to already-loaded lessons.
+        for _ in range(7):
+            if any(sanitized_origin(getattr(f, 'url', '')) in trusted for f in frames):
+                break
+            page.wait_for_timeout(650)
+            frames = list(page.frames)
     except Exception:
         frames = []
     sections, images, sources, verified_lessons = [], [], [], []
@@ -267,9 +293,17 @@ def capture_current_training_frame(page, allowed_urls: list[str], out: Path, fol
             continue
         sources.append(source)
         live_route = safe_lesson_url(getattr(frame, 'url', ''))
-        structure = rise_frame_metadata(frame) if live_route else {}
-        actual_id = structure.get('lesson_id')
         route_id = rise_lesson_id(live_route or '')
+        if route_id:
+            # The iframe navigation can finish before the Rise SPA renders its
+            # lesson nodes. Its DOM is the evidence, not the iframe URL alone.
+            try:
+                frame.locator('[data-lesson-id]').first.wait_for(
+                    state='attached', timeout=7000)
+            except Exception:
+                pass
+        structure = rise_frame_metadata(frame) if route_id else {}
+        actual_id = structure.get('lesson_id')
         verified = bool(route_id and actual_id == route_id)
         if verified:
             verified_lessons.append(route_id)
@@ -280,6 +314,10 @@ def capture_current_training_frame(page, allowed_urls: list[str], out: Path, fol
             'visible_block_ids': structure.get('visible_block_ids', []),
             'mapping_verified': verified,
         })
+        if route_id and actual_id and actual_id != route_id:
+            # A stale SPA view must not be exported as the requested lesson.
+            # Keep the mismatch in rise_lesson_mapping.json for diagnosis.
+            continue
         try:
             # Rise uses main.lesson-main. Prefer it to the outer course chrome.
             # Fallback is useful for other HTML5 players and existing test fakes.
@@ -327,6 +365,9 @@ def capture_current_training_frame(page, allowed_urls: list[str], out: Path, fol
                                        if lesson_metadata else None),
               'reason': ('lesson_mapped; full_chapter_coverage_not_proven' if verified_lessons
                          else 'lesson_frame_captured; lesson_mapping_not_verified' if saved_text or images
+                         else 'lesson_mapping_not_verified; route_dom_mismatch' if any(
+                             m.get('route_lesson_id') and m.get('dom_lesson_id') and
+                             m['route_lesson_id'] != m['dom_lesson_id'] for m in lesson_metadata)
                          else 'lesson_frame_not_visible'),
               'note': ('The validated #/lessons/<id> identifies a specific Rise lesson, '
                        'but does not prove interactive/hidden sections were fully extracted.')}
@@ -570,6 +611,7 @@ def collect_embed_text(page, allowed_urls: list[str], out: Path, folder: Path, t
     fragments, sources, visual_files = [], [], []
     seen = set()
     navigation_limit = False
+    verified_detached_lessons = []
     for url in allowed_urls[:5]:
         if not safe_asset_url(url):
             continue
@@ -593,6 +635,21 @@ def collect_embed_text(page, allowed_urls: list[str], out: Path, folder: Path, t
                 if actual_id != expected_id:
                     sources.append(sanitized_origin(url) + ' [lesson_route_not_confirmed]')
                     continue
+                # This URL must come from the LIVE ql-iframe on the authorized
+                # Google Skills page; verifying it in a separate tab is a safe
+                # fallback for an iframe that never mounted within the LMS.
+                details = rise_frame_metadata(tab.main_frame)
+                if details.get('lesson_id') != expected_id:
+                    sources.append(sanitized_origin(url) + ' [detached_dom_not_confirmed]')
+                    continue
+                verified_detached_lessons.append({
+                    'lesson_id': expected_id,
+                    'lesson_route': safe_lesson_url(url),
+                    'lesson_title': details.get('lesson_title') or '',
+                    'visible_block_count': details.get('visible_block_count', 0),
+                    'visible_block_ids': details.get('visible_block_ids', []),
+                    'verification_origin': 'detached_lesson_tab',
+                })
             # Rise 'Next' can change to ANOTHER lesson: never mix their text.
             for slide in range(max_slides if traverse_slides and not rise_lesson_id(url) else 1):
                 try: tab.evaluate('(y)=>window.scrollTo(0,y)', 1800)
@@ -626,8 +683,23 @@ def collect_embed_text(page, allowed_urls: list[str], out: Path, folder: Path, t
             sources.append(sanitized_origin(url) + ' [error:' + type(exc).__name__ + ']')
         finally:
             tab.close()
+    detached_verified = len(verified_detached_lessons) == 1
+    detached_proof = None
+    if detached_verified:
+        detached_proof = folder / 'rise_detached_lesson_mapping.json'
+        json_write(detached_proof, {
+            'source_page': sanitized_origin(getattr(page, 'url', '')),
+            'lessons': verified_detached_lessons,
+            'note': 'The selected route came from the original LMS iframe; the matching Rise DOM was verified in an isolated tab.',
+        })
     if not fragments and not visual_files:
-        return {'status': 'partial', 'reason': 'iframe_empty_or_unreachable', 'embedded_sources': sources}
+        return {'status': 'partial', 'reason': 'iframe_empty_or_unreachable', 'embedded_sources': sources,
+                'lesson_mapping_verified': detached_verified,
+                'lesson_id': verified_detached_lessons[0]['lesson_id'] if detached_verified else None,
+                'lesson_route': verified_detached_lessons[0]['lesson_route'] if detached_verified else None,
+                'lesson_title': verified_detached_lessons[0]['lesson_title'] if detached_verified else None,
+                'visible_block_count': verified_detached_lessons[0]['visible_block_count'] if detached_verified else 0,
+                'lesson_metadata_file': detached_proof.relative_to(out).as_posix() if detached_proof else None}
     if fragments:
         content = '\n\n---\n\n'.join(fragments)
         filename = folder / 'embedded_content.md'
@@ -639,6 +711,12 @@ def collect_embed_text(page, allowed_urls: list[str], out: Path, folder: Path, t
             'characters': len(content), 'embedded_sources': sorted(set(sources)),
             'visual_files': visual_files, 'captured_states': len(seen),
             'navigation_limit': navigation_limit,
+            'lesson_mapping_verified': detached_verified,
+            'lesson_id': verified_detached_lessons[0]['lesson_id'] if detached_verified else None,
+            'lesson_route': verified_detached_lessons[0]['lesson_route'] if detached_verified else None,
+            'lesson_title': verified_detached_lessons[0]['lesson_title'] if detached_verified else None,
+            'visible_block_count': verified_detached_lessons[0]['visible_block_count'] if detached_verified else 0,
+            'lesson_metadata_file': detached_proof.relative_to(out).as_posix() if detached_proof else None,
             'reason': 'iframe_visible_states_captured; completeness_not_proven',
             'note': 'Visual states and accessible text captured; graded navigation not automated.'}
 
@@ -649,8 +727,21 @@ def merge_embed_evidence(out: Path, folder: Path, inline: dict, detached: dict) 
     Never substitute the standalone index for a lesson-specific frame without
     recording this uncertainty.  Partial remains partial even with many images.
     """
+    inline_verified = bool(inline.get('lesson_mapping_verified'))
+    detached_verified = bool(detached.get('lesson_mapping_verified'))
+    # Never mix an unverified LMS frame with a separately verified lesson.
+    # On a conflict retain only the originally verified LMS evidence, and
+    # explicitly mark the mapping for manual review.
+    conflicting = bool(inline_verified and detached_verified and
+                       inline.get('lesson_route') != detached.get('lesson_route'))
+    if conflicting:
+        evidence = (inline,)
+    elif detached_verified and not inline_verified:
+        evidence = (detached,)
+    else:
+        evidence = (inline, detached)
     fragments, seen = [], set()
-    for state in (inline, detached):
+    for state in evidence:
         rel = state.get('content_file')
         if not rel:
             continue
@@ -667,7 +758,12 @@ def merge_embed_evidence(out: Path, folder: Path, inline: dict, detached: dict) 
         dest = folder / 'embedded_content_combined.md'
         dest.write_text('\n\n---\n\n'.join(fragments), encoding='utf-8')
         content_file = dest.relative_to(out).as_posix()
-    visuals = list(dict.fromkeys(inline.get('visual_files', []) + detached.get('visual_files', [])))
+    visuals = list(dict.fromkeys(file for state in evidence
+                                 for file in state.get('visual_files', [])))
+    selected = (inline if inline_verified else detached if detached_verified else inline)
+    mapped = (inline_verified or detached_verified) and not conflicting
+    source = ('inline_iframe' if inline_verified else 'detached_verified' if detached_verified
+              else 'unverified') if not conflicting else 'conflicting_routes'
     return {
         'status': 'partial', 'resource_format': 'embedded_html_course',
         'content_file': content_file, 'characters': sum(len(f) for f in fragments),
@@ -676,18 +772,19 @@ def merge_embed_evidence(out: Path, folder: Path, inline: dict, detached: dict) 
         'isolated_states': detached.get('captured_states', 0),
         'embedded_sources': sorted(set(inline.get('embedded_sources', []) +
                                        detached.get('embedded_sources', []))),
-        'lesson_mapping_verified': bool(inline.get('lesson_mapping_verified', False)),
-        'lesson_id': inline.get('lesson_id'),
-        'lesson_route': inline.get('lesson_route'),
-        'lesson_title': inline.get('lesson_title'),
-        'visible_block_count': inline.get('visible_block_count', 0),
-        'lesson_metadata_file': inline.get('lesson_metadata_file'),
-        'reason': ('lesson_mapped; full_chapter_coverage_not_proven'
-                   if inline.get('lesson_mapping_verified') else
-                   'visible_html_states_captured; lesson_mapping_not_verified'
+        'lesson_mapping_verified': mapped,
+        'lesson_mapping_source': source,
+        'lesson_id': selected.get('lesson_id') if mapped else None,
+        'lesson_route': selected.get('lesson_route') if mapped else None,
+        'lesson_title': selected.get('lesson_title') if mapped else None,
+        'visible_block_count': selected.get('visible_block_count', 0) if mapped else 0,
+        'lesson_metadata_file': selected.get('lesson_metadata_file') if mapped else None,
+        'reason': ('lesson_routes_conflict; manual_review_required' if conflicting
+                   else 'lesson_mapped; full_chapter_coverage_not_proven' if mapped
+                   else 'visible_html_states_captured; lesson_mapping_not_verified'
                    if content_file or visuals else 'html_course_content_not_visible'),
-        'note': ('Original lesson is identified only when #/lessons/<id> matches '
-                 'data-lesson-id in the rendered Rise document. '
+        'note': ('The Rise lesson mapping may be verified in the original iframe '
+                 'or an isolated tab using the exact route supplied by that iframe. '
                  'A verified mapping is not proof of complete interactive content.'),
     }
 
@@ -755,10 +852,10 @@ def write_inventory(out: Path, entries: dict) -> dict:
                 'reason': rec.get('reason'),
                 'text_file': rec.get('text_file'),
                 'resource_format': rec.get('resource_format'),
-                'lesson_mapping_verified': rec.get('lesson_mapping_verified'),
                 'visual_files': rec.get('visual_files', []),
                 'captured_states': rec.get('captured_states'),
                 'lesson_mapping_verified': rec.get('lesson_mapping_verified'),
+                'lesson_mapping_source': rec.get('lesson_mapping_source'),
                 'lesson_id': rec.get('lesson_id'),
                 'lesson_route': rec.get('lesson_route'),
                 'lesson_title': rec.get('lesson_title'),
@@ -836,7 +933,8 @@ def write_inventory(out: Path, entries: dict) -> dict:
 
 
 def run(out: Path, profile_dir: str, *, headless=False, include_quiz_start=False,
-        delay=2.0, limit=0, audit_only=False, traverse_slides=True, retry_partial=False, only=None) -> dict:
+        delay=2.0, limit=0, audit_only=False, traverse_slides=True, retry_partial=False,
+        only=None, only_url=None) -> dict:
     out = out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     saved = out / 'resources_manifest.json'
@@ -849,6 +947,13 @@ def run(out: Path, profile_dir: str, *, headless=False, include_quiz_start=False
     targets = page_resources(out)
     if only:
         targets = [target for target in targets if target['kind'] == only]
+    if only_url:
+        normalized = sanitized_origin(only_url)
+        if not normalized or urlparse(normalized).hostname != 'www.skills.google':
+            raise ValueError('--only-url requiere una URL HTTPS de www.skills.google')
+        targets = [target for target in targets if sanitized_origin(target['url']) == normalized]
+        if not targets:
+            raise ValueError('La URL solicitada no figura entre los recursos guardados en export_pde/pages')
     if audit_only:
         return write_inventory(out, manifest)
     try:
@@ -902,7 +1007,8 @@ def run(out: Path, profile_dir: str, *, headless=False, include_quiz_start=False
                             html = page.locator('html').evaluate('(e)=>e.outerHTML', timeout=12000)
                             recent = extract_page(html, url)
                             links = recent.get('links', []) + links
-                            iframe_urls = find_bundle_urls(links)
+                            iframe_urls = list(dict.fromkeys(live_bundle_urls(page) +
+                                                                 find_bundle_urls(links)))
                             current = capture_current_training_frame(page, iframe_urls, out, folder)
                             # Metadata normalized away the Rise #/lessons/<id> hash.
                             # Recover the selected route from the LIVE iframe; the
@@ -987,13 +1093,14 @@ def main():
     ap.add_argument('--no-traverse-slides', action='store_true', help='Solo primera pantalla de iframe')
     ap.add_argument('--retry-partial', action='store_true', help='Volver a inspeccionar incluso recursos parciales ya guardados')
     ap.add_argument('--only', choices=['quiz', 'document', 'html_bundle'], help='Recuperar solo esta clase de recurso')
+    ap.add_argument('--only-url', help='Reintentar un unico recurso ya registrado, sin recorrer los demas')
     ap.add_argument('--limit', type=int, default=0)
     args = ap.parse_args()
     report = run(args.out, args.profile_dir, headless=args.headless,
                  include_quiz_start=args.enter_quizzes, delay=args.delay,
                  limit=max(0, args.limit), audit_only=args.audit_only,
                  traverse_slides=not args.no_traverse_slides, retry_partial=args.retry_partial,
-                 only=args.only)
+                 only=args.only, only_url=args.only_url)
     print(json.dumps({'total': sum(i['total'] for i in report['resource_totals'].values()),
                       'resource_totals': report['resource_totals'],
                       'complete': report['complete'],
