@@ -6,12 +6,13 @@ import tempfile
 import unittest
 import zipfile
 import io
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from recover_path_resources import (
     safe_asset_url, resource_type, page_resources, write_inventory, download_asset,
     quiz_has_questions, find_download_urls, find_bundle_urls, collect_embed_text,
-    read_office_text, decode_binary_type,
+    read_office_text, decode_binary_type, download_via_visible_button,
 )
 from package_security import redact_signed_urls
 from package_full_export import package
@@ -87,6 +88,79 @@ class ResourceTests(unittest.TestCase):
                                   'https://www.skills.google/paths/16/course_templates/53/documents/1')
             self.assertEqual(item['status'], 'recovered')
             self.assertEqual(item['content_type'], 'application/pdf')
+
+    def test_download_button_fallback_uses_visible_explicit_label(self):
+        class Download:
+            suggested_filename = 'cloud-data.pdf'
+            def save_as(self, path): Path(path).write_bytes(b'%PDF-1.7\nLOCAL TEST')
+        class DownloadEvent:
+            value = Download()
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+        class Control:
+            def is_visible(self): return True
+            def is_enabled(self): return True
+            def click(self, **kwargs): pass
+        class Controls:
+            def count(self): return 1
+            def nth(self, i): return Control()
+        class Page:
+            calls = []
+            def get_by_role(self, role, name):
+                self.calls.append(role)
+                return Controls() if role == 'button' else SimpleNamespace(count=lambda: 0)
+            def expect_download(self, timeout): return DownloadEvent()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pg = Page()
+            item = download_via_visible_button(pg, root,
+                'https://www.skills.google/paths/16/course_templates/54/documents/631438')
+            self.assertEqual(item['status'], 'recovered')
+            self.assertEqual(item['retrieval_method'], 'visible_download_button')
+            self.assertEqual((root / item['file']).read_bytes(), b'%PDF-1.7\nLOCAL TEST')
+            self.assertNotIn('download_url', item)
+            self.assertEqual(pg.calls, ['button'])
+
+    def test_download_button_absent_never_marks_recovered(self):
+        class Page:
+            def get_by_role(self, role, name): return SimpleNamespace(count=lambda: 0)
+        with tempfile.TemporaryDirectory() as td:
+            item = download_via_visible_button(Page(), Path(td), 'https://www.skills.google/test')
+            self.assertEqual(item['status'], 'partial')
+            self.assertIn('no_usable_download', item['reason'])
+
+    def test_ai_pack_locked_original_uses_new_valid_zip(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self.fixture(root)
+            build(root)
+            target = root / 'ai_library' / 'study_pack_path_16.zip'
+            previous = target.read_bytes()
+            import build_ai_corpus as corpus_module
+            actual = corpus_module.os.replace
+            def locked_once(source, dest):
+                if Path(dest) == target:
+                    raise PermissionError('Simulated Windows shared-file lock')
+                return actual(source, dest)
+            with patch.object(corpus_module.os, 'replace', side_effect=locked_once):
+                result = build(root)
+            self.assertEqual(target.read_bytes(), previous)
+            self.assertIn('_new_', result['ai_pack_path'])
+            self.assertEqual(result['ai_pack_status'], 'original_zip_locked_new_copy_created')
+            with zipfile.ZipFile(result['ai_pack_path']) as archive:
+                self.assertIsNone(archive.testzip())
+                self.assertIn('study_corpus.jsonl', archive.namelist())
+            latest = json.loads((root / 'ai_library' / 'latest_pack.json').read_text())
+            self.assertEqual(latest['file'], Path(result['ai_pack_path']).name)
+
+    def test_inventory_contains_unresolved_reason_histogram(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self.fixture(root)
+            res = page_resources(root)
+            doc = next(item for item in res if item['kind'] == 'document')
+            report = write_inventory(root, {doc['url']: {'kind': 'document', 'status': 'partial',
+                                                         'reason': 'no_download_link'}})
+            self.assertEqual(report['unresolved_reasons']['document']['no_download_link'], 1)
+            self.assertEqual(report['resource_totals']['quiz']['not_attempted'], 1)
 
     def test_ooxml_docx_text_is_extracted_without_office(self):
         with tempfile.TemporaryDirectory() as td:

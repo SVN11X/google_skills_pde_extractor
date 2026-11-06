@@ -8,8 +8,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import tempfile
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -299,9 +302,42 @@ IA no certifica que sea correcta ni sustituye la documentación oficial vigente.
                                'reason': resource.get('reason')})
     (ai / 'resource_index.json').write_text(json.dumps(resource_index, ensure_ascii=False, indent=2), encoding='utf-8')
     package = ai / f'study_pack_path_{path_id}.zip'
-    with zipfile.ZipFile(package, 'w', compression=zipfile.ZIP_DEFLATED) as z:
-        for name in ('study_corpus.jsonl', 'study_corpus.md', 'index.json', 'INSTRUCCIONES_IA.md', 'resource_index.json'):
-            z.write(ai / name, name)
+    contents = ('study_corpus.jsonl', 'study_corpus.md', 'index.json',
+                'INSTRUCCIONES_IA.md', 'resource_index.json')
+    # On Windows, Explorer, antivirus and cloud-sync tools can temporarily lock
+    # an existing ZIP. Never open that ZIP with mode="w" or destroy a good pack.
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix=f'.study_pack_{path_id}_',
+                                         suffix='.zip.tmp', dir=ai, delete=False) as f:
+            temp_name = Path(f.name)
+        with zipfile.ZipFile(temp_name, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+            for name in contents:
+                z.write(ai / name, name)
+        # Reject accidentally empty or truncated packages before publishing.
+        with zipfile.ZipFile(temp_name) as z:
+            if z.testzip() is not None or set(z.namelist()) != set(contents):
+                raise RuntimeError('El ZIP para IA no superó la comprobación de integridad')
+        try:
+            os.replace(temp_name, package)
+            destination = package
+            reason = 'updated'
+        except PermissionError:
+            # In-use ZIP cannot be replaced on Windows. Publish this result
+            # under a unique name instead of reporting a false success.
+            stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+            destination = ai / f'study_pack_path_{path_id}_new_{stamp}.zip'
+            os.replace(temp_name, destination)
+            reason = 'original_zip_locked_new_copy_created'
+        stats['ai_pack_path'] = str(destination)
+        stats['ai_pack_status'] = reason
+        (ai / 'latest_pack.json').write_text(json.dumps({
+            'path_id': path_id, 'file': destination.name, 'status': reason,
+            'note': 'This is the current verified archive; older study_pack ZIPs may be stale.'
+        }, ensure_ascii=False, indent=2), encoding='utf-8')
+    finally:
+        if temp_name is not None:
+            temp_name.unlink(missing_ok=True)
     return stats
 
 

@@ -101,3 +101,23 @@ No borrar `export_pde`, `.venv`, `.google_skills_browser`. No subir el perfil ni
 archivos `export_pde/` a GitHub. Los enlaces firmados de Google Storage se usan
 solo durante la descarga y se eliminan de los índices y ZIP compartibles.
 El programa deja los estados y archivos originales intactos al fallar.
+
+
+## Reejecucion selectiva y ZIP bloqueado (Windows)
+
+Si la primera pasada obtuvo 19/43 documentos y dejo 24 parciales,
+`REINTENTAR_DOCUMENTOS_PARCIALES_WINDOWS.bat` reintenta **solo** documentos
+incompletos sin descargar los ya recuperados. Admite enlaces alternativos y
+botones *Download document* visibles. No inicia quizzes ni modifica respuestas.
+
+Si Windows bloquea `ai_library/study_pack_path_16.zip`, el exportador ahora
+crea una nueva copia validada con sufijo `_new_...zip` y registra la ubicación
+exacta en `ai_library/latest_pack.json`; el ZIP anterior no se sobrescribe.
+Los documentos y la biblioteca completa no se borran por un fallo de bloqueo.
+
+`resource_coverage_report.json` incorpora `unresolved_reasons` por tipo de
+recurso. El estado `partial` de los 35 HTML embebidos **no demuestra** que no
+haya contenido guardado: puede existir texto y capturas de la parte visible,
+pero no evidencia de todas las diapositivas/ramas. Los 41 quizzes permanecen
+parciales porque comenzar intentos es una operación independiente con
+confirmación. No se afirma extracción exhaustiva del Path 16.

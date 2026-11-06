@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import tempfile
 import time
 import zipfile
 import xml.etree.ElementTree as ET
@@ -217,6 +218,58 @@ def download_asset(context, url: str, out: Path, source_url: str, max_bytes=MAX_
     except Exception as exc:
         return {'status': 'failed', 'reason': type(exc).__name__, 'asset_source': source}
 
+
+
+def download_via_visible_button(page, out: Path, source_url: str) -> dict:
+    """Fallback for document pages whose download is triggered by a button.
+
+    Only activates explicitly labeled download controls on a *document* page.
+    Never navigates quiz or exam controls and never stores signed URLs.
+    """
+    last = {'status': 'partial', 'reason': 'no_usable_download_link_or_button'}
+    for role in ('button', 'link'):
+        try:
+            controls = page.get_by_role(role, name=DOWNLOAD_LABEL)
+            count = min(controls.count(), 3)
+        except Exception:
+            continue
+        for i in range(count):
+            try:
+                control = controls.nth(i)
+                if not control.is_visible() or not control.is_enabled():
+                    continue
+                # Wait only for actual user-visible browser downloads.
+                with page.expect_download(timeout=8500) as pending:
+                    control.click(timeout=4500)
+                download = pending.value
+                with tempfile.NamedTemporaryFile(suffix='.download', delete=False) as temporary:
+                    tmp_path = Path(temporary.name)
+                try:
+                    download.save_as(str(tmp_path))
+                    if not tmp_path.is_file() or tmp_path.stat().st_size > MAX_SIZE:
+                        last = {'status': 'partial', 'reason': 'button_download_oversized_or_missing'}
+                        continue
+                    data = tmp_path.read_bytes()
+                    detected = decode_binary_type('', data)
+                    if detected not in SAFE_MIMES:
+                        last = {'status': 'partial', 'reason': 'button_download_unsupported_or_invalid'}
+                        continue
+                    digest = hashlib.sha256(data).hexdigest()
+                    name = safe_file_name(download.suggested_filename or '', digest[:12], SAFE_MIMES[detected])
+                    dest = out / 'assets' / 'documents' / hashlib.sha256(source_url.encode()).hexdigest()[:14] / name
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    staged = dest.with_suffix(dest.suffix + '.tmp')
+                    staged.write_bytes(data)
+                    staged.replace(dest)
+                    return {'status': 'recovered', 'file': dest.relative_to(out).as_posix(),
+                            'bytes': len(data), 'sha256': digest, 'content_type': detected,
+                            'retrieval_method': 'visible_download_button'}
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+            except Exception as exc:
+                last = {'status': 'partial', 'reason': 'button_download_unavailable',
+                        'error_type': type(exc).__name__}
+    return last
 
 def read_pdf_text(path: Path, max_pages=350) -> str:
     try:
@@ -476,9 +529,16 @@ def write_inventory(out: Path, entries: dict) -> dict:
         activities.append({'title': item.get('title'), 'url': sanitized_origin(activity_url),
                            'type': 'course' if key else 'standalone_lab' if focus else 'other',
                            'resources_detected': len(related)})
+    reasons = {}
+    for kind in ('document', 'html_bundle', 'quiz'):
+        reasons[kind] = dict(sorted(Counter(
+            (r.get('reason') or 'unspecified') for r in audit
+            if r['kind'] == kind and r['status'] != 'recovered'
+        ).items()))
     report = {'generated_at': timestamp(), 'path': seed.get('source_url') or '',
               'catalog_activities': len(activities), 'activities': activities,
-              'resource_totals': per_kind, 'resources': audit,
+              'resource_totals': per_kind, 'unresolved_reasons': reasons,
+              'resources': audit,
               'complete': all(v['recovered'] == v['total'] for v in per_kind.values()) and len(activities) > 0,
               'limitations': [
                   'Status recovered means a file or current iframe state exists, not that all interactive screens were traversed.',
@@ -562,12 +622,27 @@ def run(out: Path, profile_dir: str, *, headless=False, include_quiz_start=False
                             recent = extract_page(html, url)
                             links = recent.get('links', []) + meta.get('links', [])
                             urls = find_download_urls(links)
-                            if not urls:
-                                entry.update(status='partial', reason='no_download_link')
-                            else:
-                                entry.update(download_asset(context, urls[0], out, url))
-                                if entry['status'] == 'recovered':
-                                    save_document_text(out, entry)
+                            attempts = []
+                            downloaded = None
+                            for asset_url in urls[:5]:
+                                attempt = download_asset(context, asset_url, out, url)
+                                attempts.append(attempt.get('reason') or
+                                                f"HTTP {attempt.get('http_status')}" if attempt.get('http_status') else
+                                                attempt.get('reason') or attempt['status'])
+                                if attempt['status'] == 'recovered':
+                                    downloaded = attempt
+                                    break
+                                if attempt.get('http_status') == 429:
+                                    downloaded = attempt
+                                    break
+                            if downloaded is None:
+                                downloaded = download_via_visible_button(page, out, url)
+                            entry.update(downloaded)
+                            entry['candidate_downloads_tested'] = len(attempts)
+                            if entry['status'] != 'recovered' and attempts:
+                                entry['download_attempt_reasons'] = attempts
+                            if entry['status'] == 'recovered':
+                                save_document_text(out, entry)
                     # Page is not marked complete for the old crawler; only this manifest changes.
                 except Exception as exc:
                     entry.update(status='failed', reason=type(exc).__name__, detail=str(exc)[:180])
