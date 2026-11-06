@@ -1,0 +1,209 @@
+from pathlib import Path
+from types import SimpleNamespace
+import json
+import sys
+import tempfile
+import unittest
+import zipfile
+import io
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from recover_path_resources import (
+    safe_asset_url, resource_type, page_resources, write_inventory, download_asset,
+    quiz_has_questions, find_download_urls, find_bundle_urls, collect_embed_text,
+    read_office_text, decode_binary_type,
+)
+from package_security import redact_signed_urls
+from package_full_export import package
+from build_ai_corpus import build
+from audit_complete_path import audit
+
+
+class ResourceTests(unittest.TestCase):
+    def test_scope_and_url_security(self):
+        self.assertEqual(resource_type('https://www.skills.google/paths/16/course_templates/53/quizzes/123'), 'quiz')
+        self.assertEqual(resource_type('https://www.skills.google/paths/16/course_templates/53/documents/123'), 'document')
+        self.assertEqual(resource_type('https://www.skills.google/paths/16/course_templates/53/html_bundles/123'), 'html_bundle')
+        self.assertIsNone(resource_type('https://example.com/paths/16/course_templates/53/quizzes/123'))
+        self.assertFalse(safe_asset_url('http://storage.googleapis.com/a'))
+        self.assertFalse(safe_asset_url('https://storage.googleapis.com.evil.example/a'))
+        self.assertTrue(safe_asset_url('https://storage.googleapis.com/course/a.pdf'))
+
+    def test_signed_urls_cannot_leak_to_shareable_text(self):
+        raw = 'PDF: https://storage.googleapis.com/x/d.pdf?GoogleAccessId=a&Signature=SECRET&Expires=123) test'
+        clean = redact_signed_urls(raw)
+        self.assertIn('https://storage.googleapis.com/x/d.pdf)', clean)
+        self.assertNotIn('SECRET', clean)
+        self.assertNotIn('GoogleAccessId', clean)
+
+    def test_landing_is_not_content(self):
+        self.assertFalse(quiz_has_questions('5 questions 80% passing score Start quiz'))
+        self.assertTrue(quiz_has_questions('Question 1 of 5. Choose one. A) BigQuery B) Dataflow C) Cloud Storage D) Dataproc'))
+
+    def test_find_actual_document_and_bundle_links(self):
+        links = [
+            {'url': 'https://storage.googleapis.com/a.pdf?Signature=secret', 'label': 'Download document', 'tag': 'ql-button'},
+            {'url': 'https://storage.googleapis.com/course/index.html', 'label': '#html-bundle-iframe', 'tag': 'ql-iframe'},
+            {'url': 'https://evil.test/steal', 'label': 'Download document', 'tag': 'a'},
+        ]
+        self.assertEqual(len(find_download_urls(links)), 2) # PDF first; iframe is metadata fallback
+        self.assertEqual(find_bundle_urls(links), ['https://storage.googleapis.com/course/index.html'])
+
+    def test_pdf_download_saves_bytes_and_never_signed_url(self):
+        class Resp:
+            status = 200
+            headers = {'content-type': 'application/pdf', 'content-length': '17'}
+            def body(self): return b'%PDF-1.7\nhello\n'
+        class Req:
+            def get(self, *args, **kwargs): return Resp()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            item = download_asset(SimpleNamespace(request=Req()), 'https://storage.googleapis.com/x.pdf?Signature=SENSITIVE', root,
+                                  'https://www.skills.google/paths/16/course_templates/1133/documents/648727')
+            self.assertEqual(item['status'], 'recovered')
+            self.assertTrue((root / item['file']).exists())
+            self.assertNotIn('Signature', json.dumps(item))
+            self.assertNotIn('SENSITIVE', json.dumps(item))
+
+    def test_http_429_recorded_without_retry(self):
+        class Req:
+            calls = 0
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                return SimpleNamespace(status=429)
+        req = Req()
+        with tempfile.TemporaryDirectory() as td:
+            item = download_asset(SimpleNamespace(request=req), 'https://storage.googleapis.com/doc.pdf', Path(td), 'https://www.skills.google/documents/1')
+            self.assertEqual(item['status'], 'blocked')
+            self.assertEqual(req.calls, 1)
+
+    def test_octet_stream_pdf_is_recognized_by_signature(self):
+        class Req:
+            def get(self, *args, **kwargs):
+                return SimpleNamespace(status=200, headers={'content-type': 'application/octet-stream'},
+                                       body=lambda: b'%PDF-1.5\nsynthetic')
+        with tempfile.TemporaryDirectory() as td:
+            item = download_asset(SimpleNamespace(request=Req()), 'https://storage.googleapis.com/doc', Path(td),
+                                  'https://www.skills.google/paths/16/course_templates/53/documents/1')
+            self.assertEqual(item['status'], 'recovered')
+            self.assertEqual(item['content_type'], 'application/pdf')
+
+    def test_ooxml_docx_text_is_extracted_without_office(self):
+        with tempfile.TemporaryDirectory() as td:
+            doc = Path(td) / 'test.docx'
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w') as z:
+                z.writestr('word/document.xml',
+                           '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                           '<w:body><w:p><w:r><w:t>BigQuery supports SQL</w:t></w:r></w:p></w:body></w:document>')
+            doc.write_bytes(buffer.getvalue())
+            self.assertIn('wordprocessingml.document', decode_binary_type('application/octet-stream', buffer.getvalue()))
+            self.assertIn('BigQuery supports SQL', read_office_text(doc))
+
+    def test_extracted_iframe_visual_state_stays_partial(self):
+        class Frame:
+            url = 'https://storage.googleapis.com/cloud-training/course/index.html'
+            def locator(self, value):
+                return SimpleNamespace(inner_text=lambda timeout=8500: 'This is a visible training lesson about BigQuery and Dataflow pipelines.')
+        class Tab:
+            frames = [Frame()]
+            def goto(self, *args, **kwargs): return SimpleNamespace(status=200)
+            def wait_for_timeout(self, x): pass
+            def evaluate(self, *args): pass
+            def screenshot(self, **kwargs): return b'PNG_TEST_IMAGE'
+            def close(self): pass
+        class Context:
+            def new_page(self): return Tab()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            folder = root / 'pages' / 'html_bundle_1'
+            folder.mkdir(parents=True)
+            state = collect_embed_text(SimpleNamespace(context=Context()),
+                         ['https://storage.googleapis.com/cloud-training/course/index.html'], root,
+                         folder, traverse_slides=False)
+            self.assertEqual(state['status'], 'partial')
+            self.assertTrue((root / state['content_file']).is_file())
+            self.assertEqual(len(state['visual_files']), 1)
+            self.assertTrue((root / state['visual_files'][0]).is_file())
+
+    def fixture(self, root):
+        pages = root / 'pages'
+        examples = [
+            ('https://www.skills.google/paths/16/course_templates/1133/quizzes/650779', 'quiz'),
+            ('https://www.skills.google/paths/16/course_templates/1133/documents/648727', 'document'),
+            ('https://www.skills.google/paths/16/course_templates/52/html_bundles/592746', 'html_bundle'),
+            ('https://www.skills.google/focuses/2794?path=16', 'focus'),
+        ]
+        for i, (url, _) in enumerate(examples):
+            folder = pages / f'p{i}'
+            folder.mkdir(parents=True)
+            (folder / 'metadata.json').write_text(json.dumps({'url': url, 'title': 'Test'}), encoding='utf-8')
+            (folder / 'content.md').write_text('Course material', encoding='utf-8')
+        (root / 'initial_catalog.json').write_text(json.dumps({'source_url': 'https://www.skills.google/paths/16',
+            'activities': [{'title': 'A Tour', 'url': 'https://www.skills.google/focuses/2794?path=16'}]}), encoding='utf-8')
+
+    def test_offline_inventory_and_thirteenth_standalone(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self.fixture(root)
+            resources = page_resources(root)
+            self.assertEqual(len(resources), 3)
+            report = write_inventory(root, {})
+            self.assertEqual(report['resource_totals']['quiz']['not_attempted'], 1)
+            self.assertEqual(report['catalog_activities'], 1)
+            self.assertEqual(report['activities'][0]['type'], 'standalone_lab')
+            self.assertFalse(report['complete'])
+            inventory = audit(root)
+            self.assertEqual(inventory['catalog']['activities_with_page_evidence'], 1)
+            self.assertEqual(inventory['interactive_unresolved_count'], 3)
+
+    def test_partial_iframe_is_not_reported_as_complete(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self.fixture(root)
+            target = next(v for v in page_resources(root) if v['kind'] == 'html_bundle')
+            text = target['folder'] / 'embedded_content.md'
+            text.write_text('Slide: Dataflow works on Apache Beam.', encoding='utf-8')
+            manifest = {target['url']: {'kind': 'html_bundle', 'status': 'partial',
+                        'content_file': str(text.relative_to(root))}}
+            report = write_inventory(root, manifest)
+            self.assertEqual(report['resource_totals']['html_bundle']['partial'], 1)
+            self.assertFalse(report['complete'])
+
+    def test_corpus_includes_recovered_resource_without_false_completeness(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self.fixture(root)
+            target = next(v for v in page_resources(root) if v['kind'] == 'html_bundle')
+            f = target['folder'] / 'embedded_content.md'
+            f.write_text('Streaming ingestion is often implemented using Pub/Sub.\n' * 5, encoding='utf-8')
+            (root / 'resources_manifest.json').write_text(json.dumps({target['url']: {
+                'kind': 'html_bundle', 'status': 'partial', 'content_file': str(f.relative_to(root))}}), encoding='utf-8')
+            result = build(root)
+            self.assertGreater(result['recovered_resource_chunks'], 0)
+            corpus = (root / 'ai_library' / 'study_corpus.jsonl').read_text(encoding='utf-8')
+            self.assertIn('recovered_html_bundle', corpus)
+            self.assertIn('"resource_status": "partial"', corpus)
+            zipname = root / 'ai_library' / 'study_pack_path_16.zip'
+            self.assertTrue(zipname.is_file())
+
+    def test_package_excludes_sources_and_secrets_but_includes_docs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); self.fixture(root)
+            (root / 'pages' / 'p1' / 'metadata.json').write_text(json.dumps({'url': 'https://www.skills.google/a',
+                'links': [{'url': 'https://storage.googleapis.com/a.pdf?GoogleAccessId=ABCD&Signature=VERYSECRET'}]}), encoding='utf-8')
+            video = root / 'videos' / 'fake'
+            video.mkdir(parents=True)
+            (video / 'source.mp4').write_bytes(b'video data')
+            (video / 'transcript_hq.txt').write_text('Hello from HQ', encoding='utf-8')
+            (root / 'assets' / 'documents').mkdir(parents=True)
+            (root / 'assets' / 'documents' / 'study.pdf').write_bytes(b'%PDF-1.4')
+            result = package(root)
+            with zipfile.ZipFile(result['zip']) as z:
+                self.assertIn('assets/documents/study.pdf', z.namelist())
+                self.assertNotIn('videos/fake/source.mp4', z.namelist())
+                self.assertIn('videos/fake/transcript_hq.txt', z.namelist())
+                text = z.read('pages/p1/metadata.json').decode('utf-8')
+                self.assertNotIn('VERYSECRET', text)
+                self.assertIn('FULL_ARCHIVE_MANIFEST.json', z.namelist())
+
+
+if __name__ == '__main__':
+    unittest.main()

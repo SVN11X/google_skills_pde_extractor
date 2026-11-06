@@ -13,6 +13,8 @@ import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
+from package_security import redact_signed_urls
+
 
 def read_json(path, fallback):
     try:
@@ -35,6 +37,10 @@ def safe_relative(path: Path, base: Path) -> str:
 def path_id_for(out: Path) -> str:
     report = read_json(out / 'coverage_report.json', {})
     match = re.search(r'/paths/(\d+)', str(report.get('path', '')))
+    if match:
+        return match.group(1)
+    catalog = read_json(out / 'initial_catalog.json', {})
+    match = re.search(r'/paths/(\d+)', str(catalog.get('source_url', '')))
     if match:
         return match.group(1)
     match = re.search(r'(?:path_|paths_)(\d+)', out.name)
@@ -122,13 +128,14 @@ def build(out: Path) -> dict:
         source_file = meta_path.parent / 'content.md'
         if not source_file.is_file():
             continue
-        raw = source_file.read_text(encoding='utf-8').strip()
+        raw = redact_signed_urls(source_file.read_text(encoding='utf-8')).strip()
         if not raw:
             continue
         page_count += 1
         for index, chunk in enumerate(split_paragraphs(raw), 1):
             corpus.append({'id': sha(f'{path_id}|{meta["url"]}|{index}|{chunk}'),
                            'path_id': path_id, 'kind': 'page',
+                           'source_scope': 'path_content' if urlparse(meta['url']).hostname == 'www.skills.google' else 'reference_external',
                            'title': meta.get('title') or meta['url'],
                            'source_url': meta['url'], 'source_file': safe_relative(source_file, out),
                            'chunk_number': index, 'text': chunk,
@@ -182,6 +189,54 @@ def build(out: Path) -> dict:
                            'frame_files_sample': frames, 'chunk_number': index,
                            'text': text, 'ai_verified': False})
 
+    # Extra resources are an explicit, separately-audited layer. Never present a
+    # quiz landing page or incomplete iframe as fully extracted teaching text.
+    resource_manifest = read_json(out / 'resources_manifest.json', {})
+    resource_count = 0
+    for url, resource in sorted(resource_manifest.items()):
+        if not isinstance(resource, dict):
+            continue
+        kind = resource.get('kind', '')
+        file_path = resource.get('content_file') or resource.get('text_file')
+        if kind not in ('quiz', 'html_bundle', 'document') or not file_path:
+            continue
+        actual = out / file_path
+        try:
+            # A manifest may refer to an interrupted/invalid resource; don't
+            # treat it as evidence unless the file still exists inside out.
+            if not actual.resolve().is_relative_to(out) or not actual.is_file():
+                continue
+            text = redact_signed_urls(actual.read_text(encoding='utf-8'))
+        except (OSError, UnicodeError):
+            continue
+        for index, chunk in enumerate(split_paragraphs(text), 1):
+            corpus.append({'id': sha(f'{path_id}|resource|{url}|{index}|{chunk}'),
+                           'path_id': path_id, 'kind': 'recovered_' + kind,
+                           'resource_status': resource.get('status', 'unknown'),
+                           'source_scope': 'path_content',
+                           'title': f'{kind}: {urlparse(url).path.rsplit("/", 1)[-1]}',
+                           'source_url': url, 'source_file': file_path,
+                           'chunk_number': index, 'text': chunk,
+                           'provenance': 'recovered_local_resource', 'ai_verified': False})
+            resource_count += 1
+
+    # Mark rather than delete cross-URL duplicate text: a learner or auditing
+    # tool may need both source URLs even when content is identical.
+    duplicate_first = {}
+    duplicate_count = 0
+    for chunk in corpus:
+        if chunk.get('kind') not in ('page', 'recovered_html_bundle', 'recovered_quiz', 'recovered_document'):
+            continue
+        normalized = re.sub(r'\s+', ' ', chunk.get('text', '')).strip()
+        if len(normalized) < 50:
+            continue
+        fingerprint = sha(normalized)
+        if fingerprint in duplicate_first:
+            chunk['duplicate_of'] = duplicate_first[fingerprint]
+            duplicate_count += 1
+        else:
+            duplicate_first[fingerprint] = chunk['id']
+
     ai = out / 'ai_library'
     ai.mkdir(parents=True, exist_ok=True)
     index_jsonl = ai / 'study_corpus.jsonl'
@@ -205,7 +260,10 @@ def build(out: Path) -> dict:
              'fallback_original_videos': fallback_original_count,
              'fallback_original_video_ids': fallback_video_ids,
              'hq_status': 'complete' if hq_video_count == len(videos) and videos else 'partial',
-             'chunks': len(corpus), 'hq_video_chunks': sum(c['provenance']=='whisper_hq' for c in corpus),
+             'chunks': len(corpus), 'exact_duplicate_text_chunks': duplicate_count,
+             'recovered_resource_chunks': resource_count,
+             'resource_coverage': read_json(out / 'resource_coverage_report.json', {}).get('resource_totals', {}),
+             'hq_video_chunks': sum(c['provenance']=='whisper_hq' for c in corpus),
              'note': 'La calidad de ASR no se valida automáticamente. Conservar referencias al material original.'}
     (ai / 'index.json').write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
     (ai / 'INSTRUCCIONES_IA.md').write_text('''# Cómo estudiar con esta biblioteca
@@ -226,9 +284,23 @@ Antes de usar cualquier dato sensible, solicita confirmación.
 Las transcripciones son automáticas y pueden contener errores. Una respuesta de la
 IA no certifica que sea correcta ni sustituye la documentación oficial vigente.
 ''', encoding='utf-8')
+    # The compact IA ZIP remains textual by design. Its index now states
+    # clearly which original PDF/visual binaries require the complete archive.
+    resource_index = []
+    for url, resource in sorted(resource_manifest.items()):
+        if not isinstance(resource, dict):
+            continue
+        resource_index.append({'source_url': url, 'kind': resource.get('kind'),
+                               'status': resource.get('status'),
+                               'file': resource.get('file'),
+                               'content_file': resource.get('content_file'),
+                               'text_file': resource.get('text_file'),
+                               'sha256': resource.get('sha256'),
+                               'reason': resource.get('reason')})
+    (ai / 'resource_index.json').write_text(json.dumps(resource_index, ensure_ascii=False, indent=2), encoding='utf-8')
     package = ai / f'study_pack_path_{path_id}.zip'
     with zipfile.ZipFile(package, 'w', compression=zipfile.ZIP_DEFLATED) as z:
-        for name in ('study_corpus.jsonl', 'study_corpus.md', 'index.json', 'INSTRUCCIONES_IA.md'):
+        for name in ('study_corpus.jsonl', 'study_corpus.md', 'index.json', 'INSTRUCCIONES_IA.md', 'resource_index.json'):
             z.write(ai / name, name)
     return stats
 
