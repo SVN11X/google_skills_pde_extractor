@@ -149,6 +149,82 @@ def find_bundle_urls(links: list[dict]) -> list[str]:
     return urls
 
 
+def is_training_html_url(url: str) -> bool:
+    """Some Google Skills *documents* are actually hosted HTML5 course chapters.
+
+    Never interpret their Download document link as a PDF attachment.  Keep the
+    source lesson URL in the report; a shared HTML index does not by itself
+    establish which chapter was shown.
+    """
+    parsed = urlparse(url)
+    return (safe_asset_url(url) and parsed.hostname == 'storage.googleapis.com'
+            and '/cls-html5-courses/' in parsed.path
+            and parsed.path.lower().endswith(('.html', '.htm')))
+
+
+def training_html_urls(links: list[dict]) -> list[str]:
+    urls = []
+    for link in links:
+        url = link.get('url', '')
+        if is_training_html_url(url) and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def capture_current_training_frame(page, allowed_urls: list[str], out: Path, folder: Path) -> dict:
+    """Capture only currently visible iframe content from the *original* lesson.
+
+    Detached tabs can lose the Google Skills chapter selection (24 documents
+    point to the same index.html).  Read the frame embedded in the actual LMS
+    page first.  No interaction, hidden DOM, quiz answers or account UI.
+    """
+    trusted = {sanitized_origin(url) for url in allowed_urls if is_training_html_url(url)}
+    if not trusted:
+        return {'status': 'partial', 'reason': 'no_trusted_training_html_url'}
+    try:
+        page.wait_for_timeout(1200)
+        frames = list(page.frames)
+    except Exception:
+        frames = []
+    sections, images, sources = [], [], []
+    for frame in frames:
+        source = sanitized_origin(getattr(frame, 'url', ''))
+        if source not in trusted:
+            continue
+        sources.append(source)
+        try:
+            text = frame.locator('body').inner_text(timeout=8500).strip()
+        except Exception:
+            text = ''
+        if len(text) >= 20:
+            sections.append(f'## Texto visible del marco {len(sections) + 1}\n\n{text}')
+        try:
+            img = frame.locator('body').screenshot(timeout=14000)
+            if img and len(img) < 8 * 1024 * 1024:
+                target = folder / 'embedded_screenshots' / f'lesson_inline_{len(images) + 1:03d}.png'
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(img)
+                images.append(target.relative_to(out).as_posix())
+        except Exception:
+            pass
+    saved_text = None
+    if sections:
+        target = folder / 'embedded_lesson_visible.md'
+        target.write_text('\n\n---\n\n'.join(sections), encoding='utf-8')
+        saved_text = target.relative_to(out).as_posix()
+    result = {'status': 'partial', 'resource_format': 'embedded_html_course',
+              'html_entrypoints': sorted(trusted),
+              'content_file': saved_text, 'characters': sum(len(s) for s in sections),
+              'visual_files': images, 'captured_states': len(images),
+              'embedded_sources': sorted(set(sources)),
+              'lesson_mapping_verified': False,
+              'reason': ('lesson_frame_captured; full_chapter_coverage_not_proven'
+                         if saved_text or images else 'lesson_frame_not_visible'),
+              'note': ('HTML course index is shared by multiple lessons. Captures come from the original '
+                       'Google Skills lesson iframe; mapping/full coverage are not claimed.')}
+    return result
+
+
 def infer_office_type(data: bytes) -> str | None:
     """Recognize Office OpenXML by internal member names, without unpacking."""
     if not data.startswith(b'PK'):
@@ -445,6 +521,47 @@ def collect_embed_text(page, allowed_urls: list[str], out: Path, folder: Path, t
             'note': 'Visual states and accessible text captured; graded navigation not automated.'}
 
 
+def merge_embed_evidence(out: Path, folder: Path, inline: dict, detached: dict) -> dict:
+    """Index both the currently selected lesson and any isolated public slides.
+
+    Never substitute the standalone index for a lesson-specific frame without
+    recording this uncertainty.  Partial remains partial even with many images.
+    """
+    fragments, seen = [], set()
+    for state in (inline, detached):
+        rel = state.get('content_file')
+        if not rel:
+            continue
+        path = out / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding='utf-8', errors='replace').strip()
+        fingerprint = hashlib.sha256(text.encode()).hexdigest()
+        if text and fingerprint not in seen:
+            seen.add(fingerprint)
+            fragments.append(text)
+    content_file = None
+    if fragments:
+        dest = folder / 'embedded_content_combined.md'
+        dest.write_text('\n\n---\n\n'.join(fragments), encoding='utf-8')
+        content_file = dest.relative_to(out).as_posix()
+    visuals = list(dict.fromkeys(inline.get('visual_files', []) + detached.get('visual_files', [])))
+    return {
+        'status': 'partial', 'resource_format': 'embedded_html_course',
+        'content_file': content_file, 'characters': sum(len(f) for f in fragments),
+        'visual_files': visuals, 'captured_states': len(visuals),
+        'inline_states': inline.get('captured_states', 0),
+        'isolated_states': detached.get('captured_states', 0),
+        'embedded_sources': sorted(set(inline.get('embedded_sources', []) +
+                                       detached.get('embedded_sources', []))),
+        'lesson_mapping_verified': False,
+        'reason': 'visible_html_states_captured; completeness_not_proven' if content_file or visuals
+                  else 'html_course_content_not_visible',
+        'note': ('Original LMS frame and isolated training slides are separate evidence; '
+                 'neither proves that every slide/lesson has been captured.'),
+    }
+
+
 def collect_quiz_state(page, out: Path, folder: Path, opt_in_start=False) -> dict:
     """Reading questions is allowed, but starting attempts requires explicit opt-in."""
     main = page.locator('main').first
@@ -507,6 +624,8 @@ def write_inventory(out: Path, entries: dict) -> dict:
                 'bytes': rec.get('bytes'), 'sha256': rec.get('sha256'),
                 'reason': rec.get('reason'),
                 'text_file': rec.get('text_file'),
+                'resource_format': rec.get('resource_format'),
+                'lesson_mapping_verified': rec.get('lesson_mapping_verified'),
                 'visual_files': rec.get('visual_files', []),
                 'captured_states': rec.get('captured_states')}
         audit.append(data)
@@ -530,14 +649,42 @@ def write_inventory(out: Path, entries: dict) -> dict:
                            'type': 'course' if key else 'standalone_lab' if focus else 'other',
                            'resources_detected': len(related)})
     reasons = {}
+    evidence = {}
     for kind in ('document', 'html_bundle', 'quiz'):
         reasons[kind] = dict(sorted(Counter(
             (r.get('reason') or 'unspecified') for r in audit
             if r['kind'] == kind and r['status'] != 'recovered'
         ).items()))
+        typed = [r for r in audit if r['kind'] == kind]
+        evidence[kind] = {
+            'with_saved_text': sum(any(bool(rel and (out / rel).is_file() and
+                                             (out / rel).suffix.lower() == '.md')
+                                       for rel in (r.get('file'), r.get('text_file'))) for r in typed),
+            'with_saved_image': sum(any((out / v).is_file() for v in r.get('visual_files', [])) for r in typed),
+            'partial_with_evidence': sum(r['status'] == 'partial' and
+                                         (bool(r.get('file') and (out / r['file']).is_file()) or
+                                          any((out / v).is_file() for v in r.get('visual_files', [])))
+                                         for r in typed),
+        }
+    document_source_types = Counter()
+    for target in targets:
+        if target['kind'] != 'document':
+            continue
+        original_links = target.get('source_metadata', {}).get('links', [])
+        candidates = find_download_urls(original_links)
+        html_links = training_html_urls(original_links)
+        binary_links = [url for url in candidates if not is_training_html_url(url)]
+        if html_links and not binary_links:
+            document_source_types['embedded_html_course'] += 1
+        elif binary_links:
+            document_source_types['downloadable_file'] += 1
+        else:
+            document_source_types['unknown'] += 1
     report = {'generated_at': timestamp(), 'path': seed.get('source_url') or '',
               'catalog_activities': len(activities), 'activities': activities,
               'resource_totals': per_kind, 'unresolved_reasons': reasons,
+              'evidence_coverage': evidence,
+              'document_source_formats': dict(document_source_types),
               'resources': audit,
               'complete': all(v['recovered'] == v['total'] for v in per_kind.values()) and len(activities) > 0,
               'limitations': [
@@ -616,33 +763,48 @@ def run(out: Path, profile_dir: str, *, headless=False, include_quiz_start=False
                             html = page.locator('html').evaluate('(e)=>e.outerHTML', timeout=12000)
                             recent = extract_page(html, url)
                             links = recent.get('links', []) + links
-                            entry.update(collect_embed_text(page, find_bundle_urls(links), out, folder, traverse_slides=traverse_slides))
+                            iframe_urls = find_bundle_urls(links)
+                            current = capture_current_training_frame(page, iframe_urls, out, folder)
+                            isolated = collect_embed_text(page, iframe_urls, out, folder,
+                                                          traverse_slides=traverse_slides)
+                            entry.update(merge_embed_evidence(out, folder, current, isolated))
                         elif kind == 'document':
                             html = page.locator('html').evaluate('(e)=>e.outerHTML', timeout=12000)
                             recent = extract_page(html, url)
                             links = recent.get('links', []) + meta.get('links', [])
                             urls = find_download_urls(links)
-                            attempts = []
-                            downloaded = None
-                            for asset_url in urls[:5]:
-                                attempt = download_asset(context, asset_url, out, url)
-                                attempts.append(attempt.get('reason') or
-                                                f"HTTP {attempt.get('http_status')}" if attempt.get('http_status') else
-                                                attempt.get('reason') or attempt['status'])
-                                if attempt['status'] == 'recovered':
-                                    downloaded = attempt
-                                    break
-                                if attempt.get('http_status') == 429:
-                                    downloaded = attempt
-                                    break
-                            if downloaded is None:
-                                downloaded = download_via_visible_button(page, out, url)
-                            entry.update(downloaded)
-                            entry['candidate_downloads_tested'] = len(attempts)
-                            if entry['status'] != 'recovered' and attempts:
-                                entry['download_attempt_reasons'] = attempts
-                            if entry['status'] == 'recovered':
-                                save_document_text(out, entry)
+                            html_urls = training_html_urls(links)
+                            binary_urls = [candidate for candidate in urls if not is_training_html_url(candidate)]
+                            if html_urls and not binary_urls:
+                                # Template 54 consists of 24 'document' pages using
+                                # a *single shared HTML5 index*, not 24 PDF files.
+                                # Reading the iframe inside this page keeps the
+                                # LMS lesson selection and avoids a false PDF error.
+                                entry.update(capture_current_training_frame(page, html_urls, out, folder))
+                                entry['candidate_downloads_tested'] = 0
+                                entry['html_document_entrypoints'] = len(html_urls)
+                            else:
+                                attempts = []
+                                downloaded = None
+                                for asset_url in binary_urls[:5]:
+                                    attempt = download_asset(context, asset_url, out, url)
+                                    attempts.append(attempt.get('reason') or
+                                                    f"HTTP {attempt.get('http_status')}" if attempt.get('http_status') else
+                                                    attempt.get('reason') or attempt['status'])
+                                    if attempt['status'] == 'recovered':
+                                        downloaded = attempt
+                                        break
+                                    if attempt.get('http_status') == 429:
+                                        downloaded = attempt
+                                        break
+                                if downloaded is None:
+                                    downloaded = download_via_visible_button(page, out, url)
+                                entry.update(downloaded)
+                                entry['candidate_downloads_tested'] = len(attempts)
+                                if entry['status'] != 'recovered' and attempts:
+                                    entry['download_attempt_reasons'] = attempts
+                                if entry['status'] == 'recovered':
+                                    save_document_text(out, entry)
                     # Page is not marked complete for the old crawler; only this manifest changes.
                 except Exception as exc:
                     entry.update(status='failed', reason=type(exc).__name__, detail=str(exc)[:180])

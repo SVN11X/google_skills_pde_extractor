@@ -13,6 +13,7 @@ from recover_path_resources import (
     safe_asset_url, resource_type, page_resources, write_inventory, download_asset,
     quiz_has_questions, find_download_urls, find_bundle_urls, collect_embed_text,
     read_office_text, decode_binary_type, download_via_visible_button,
+    is_training_html_url, training_html_urls, capture_current_training_frame, merge_embed_evidence,
 )
 from package_security import redact_signed_urls
 from package_full_export import package
@@ -29,6 +30,62 @@ class ResourceTests(unittest.TestCase):
         self.assertFalse(safe_asset_url('http://storage.googleapis.com/a'))
         self.assertFalse(safe_asset_url('https://storage.googleapis.com.evil.example/a'))
         self.assertTrue(safe_asset_url('https://storage.googleapis.com/course/a.pdf'))
+
+    def test_google_skills_document_can_be_html_course_not_pdf(self):
+        html = ('https://storage.googleapis.com/cloud-training/cls-html5-courses/'
+                'T-DLAKES-I/V3.0/T-DLAKES-I/content/index.html')
+        self.assertTrue(is_training_html_url(html))
+        self.assertFalse(is_training_html_url('https://storage.googleapis.com/public.pdf'))
+        self.assertFalse(is_training_html_url('https://evil.test/cls-html5-courses/index.html'))
+        links = [{'url': html, 'label': 'Download document', 'tag': 'ql-button'},
+                 {'url': html, 'label': '', 'tag': 'ql-iframe'}]
+        self.assertEqual(training_html_urls(links), [html])
+        self.assertTrue(all(is_training_html_url(u) for u in find_download_urls(links)))
+
+    def test_capture_only_trusted_visible_training_frame(self):
+        url = ('https://storage.googleapis.com/cloud-training/cls-html5-courses/'
+               'T-DLAKES-I/V3.0/T-DLAKES-I/content/index.html')
+        class Body:
+            def inner_text(self, **kwargs): return 'BigQuery storage lesson: partitioned tables and clustering.'
+            def screenshot(self, **kwargs): return b'FAKE PNG DATA'
+        class Frame:
+            def __init__(self, path): self.url = path
+            def locator(self, name):
+                if self.url.startswith('https://evil.test'):
+                    raise AssertionError('untrusted frame was read')
+                return Body()
+        class Page:
+            frames = [Frame('https://www.skills.google/paths/16'),
+                      Frame('https://evil.test/tracker.html'),
+                      Frame(url + '#page=3')]
+            def wait_for_timeout(self, ms): pass
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td); folder = out / 'pages' / 'some_lesson'; folder.mkdir(parents=True)
+            item = capture_current_training_frame(Page(), [url], out, folder)
+            self.assertEqual(item['status'], 'partial')
+            self.assertFalse(item['lesson_mapping_verified'])
+            self.assertEqual(item['captured_states'], 1)
+            self.assertIn('partitioned tables', (out / item['content_file']).read_text())
+            self.assertNotIn('evil.test', json.dumps(item))
+            self.assertTrue((out / item['visual_files'][0]).is_file())
+
+    def test_merge_inline_and_detached_text_provenance(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); folder = root / 'pages' / 'html_1'; folder.mkdir(parents=True)
+            a = folder / 'embedded_lesson_visible.md'
+            b = folder / 'embedded_content.md'
+            a.write_text('Lesson A - current page', encoding='utf-8')
+            b.write_text('Public slide 1', encoding='utf-8')
+            joined = merge_embed_evidence(root, folder,
+                        {'content_file': a.relative_to(root).as_posix(), 'captured_states': 1,
+                         'visual_files': [], 'embedded_sources': ['https://storage.googleapis.com/x']},
+                        {'content_file': b.relative_to(root).as_posix(), 'captured_states': 1,
+                         'visual_files': [], 'embedded_sources': ['https://storage.googleapis.com/x']})
+            self.assertEqual(joined['status'], 'partial')
+            self.assertFalse(joined['lesson_mapping_verified'])
+            data = (root / joined['content_file']).read_text()
+            self.assertIn('current page', data)
+            self.assertIn('Public slide', data)
 
     def test_signed_urls_cannot_leak_to_shareable_text(self):
         raw = 'PDF: https://storage.googleapis.com/x/d.pdf?GoogleAccessId=a&Signature=SECRET&Expires=123) test'
@@ -161,6 +218,7 @@ class ResourceTests(unittest.TestCase):
                                                          'reason': 'no_download_link'}})
             self.assertEqual(report['unresolved_reasons']['document']['no_download_link'], 1)
             self.assertEqual(report['resource_totals']['quiz']['not_attempted'], 1)
+            self.assertEqual(report['document_source_formats']['unknown'], 1)
 
     def test_ooxml_docx_text_is_extracted_without_office(self):
         with tempfile.TemporaryDirectory() as td:
@@ -223,6 +281,7 @@ class ResourceTests(unittest.TestCase):
             self.assertEqual(len(resources), 3)
             report = write_inventory(root, {})
             self.assertEqual(report['resource_totals']['quiz']['not_attempted'], 1)
+            self.assertEqual(report['document_source_formats']['unknown'], 1)
             self.assertEqual(report['catalog_activities'], 1)
             self.assertEqual(report['activities'][0]['type'], 'standalone_lab')
             self.assertFalse(report['complete'])

@@ -121,3 +121,30 @@ haya contenido guardado: puede existir texto y capturas de la parte visible,
 pero no evidencia de todas las diapositivas/ramas. Los 41 quizzes permanecen
 parciales porque comenzar intentos es una operación independiente con
 confirmación. No se afirma extracción exhaustiva del Path 16.
+
+## Documentos que en realidad son lecciones HTML5 (curso T-DLAKES-I)
+
+Las 24 páginas `/course_templates/54/documents/*` tienen un enlace «Download document»
+que apunta a **un mismo** `.../T-DLAKES-I/content/index.html`, no a PDF. El
+intento anterior produjo `button_download_unavailable` porque el navegador
+abre contenido HTML en vez de emitir una descarga de archivo.
+
+Ejecutar `RECUPERAR_DOCUMENTOS_HTML_Y_LECCIONES_WINDOWS.bat` con la sesión de
+Google Skills disponible. El programa reutiliza los 19 PDF recuperados; para los
+24 documentos HTML captura el **iframe desde la propia lección** a fin de
+conservar, cuando sea visible, la sección elegida por la plataforma. Reintenta
+luego los 35 `html_bundle` y combina capturas del iframe de la página original
+con estados obtenidos de una pestaña aislada. No inicia quizzes.
+
+`resource_coverage_report.json` incorpora `evidence_coverage` para distinguir
+recursos parciales con texto o captura guardada de recursos sin evidencia.
+Una lección con captura o texto sigue siendo **partial** si no se verificó la
+cobertura de todas sus pantallas. Dado que el curso comparte un único
+`index.html`, `lesson_mapping_verified` permanece en `false` hasta una
+comprobación adicional. Los marcadores de página, el avance y los videos HQ
+originales se conservan. El paquete para IA se actualiza al finalizar.
+
+**Importante:** la captura del contenido visible no sustituye descargar todos
+los recursos auxiliares de un curso HTML5, ni certifica haber recorrido todas
+las interacciones. Ningún resultado debe presentarse como extracción al 100 %
+sin un inventario de pantallas y verificación independiente.
