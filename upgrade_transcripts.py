@@ -66,6 +66,8 @@ def cpu_plan(workers='auto', cpu_threads='auto') -> tuple[int, int, int, float |
 def _report(out, manifest, details, model, beam_size, compute_type, *, workers=1,
             cpu_threads=None, interrupted=False, worker_exit=None):
     statuses = [x['status'] for x in details]
+    hq_count = statuses.count('upgraded') + statuses.count('already_hq')
+    pending_count = max(0, len(manifest) - hq_count)
     summary = {'at': datetime.now(timezone.utc).isoformat(), 'model': model,
                'device': 'cpu', 'compute_type': compute_type, 'beam_size': beam_size,
                'workers': workers, 'cpu_threads': cpu_threads, 'total': len(manifest),
@@ -74,11 +76,16 @@ def _report(out, manifest, details, model, beam_size, compute_type, *, workers=1
                'missing_local_media': statuses.count('missing_local_media'),
                'failed': statuses.count('failed'), 'deferred': statuses.count('deferred'),
                'interrupted': interrupted, 'worker_exit_code': worker_exit,
+               'hq_complete': hq_count, 'hq_pending': pending_count,
+               'hq_completion_status': 'complete' if pending_count == 0 else 'partial',
+               'hq_pending_ids': [x['id'] for x in details
+                                  if x['status'] not in ('upgraded', 'already_hq')],
                'details': details,
                'note': 'Las transcripciones HQ son automaticas y pueden tener errores.'}
     save_json(out / 'hq_upgrade_report.json', summary)
     print('HQ: nuevas={upgraded}; previas={already_hq}; sin fuente local={missing_local_media}; '
-          'errores={failed}; aplazadas={deferred}'.format(**summary), flush=True)
+          'errores={failed}; aplazadas={deferred}; cobertura={hq_complete}/{total}; '
+          'estado={hq_completion_status}'.format(**summary), flush=True)
     return summary
 
 

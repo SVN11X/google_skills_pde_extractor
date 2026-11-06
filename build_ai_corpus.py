@@ -135,6 +135,9 @@ def build(out: Path) -> dict:
                            'provenance': 'extracted_page', 'ai_verified': False})
 
     video_count = 0
+    hq_video_count = 0
+    fallback_original_count = 0
+    fallback_video_ids = []
     videos = read_json(out / 'videos_manifest.json', [])
     for entry in videos if isinstance(videos, list) else []:
         video_id = entry.get('id', '')
@@ -142,12 +145,24 @@ def build(out: Path) -> dict:
             continue
         folder = out / 'videos' / video_id
         enhanced = folder / 'transcript_hq.json'
-        source_file = enhanced if enhanced.is_file() else folder / 'transcript.json'
-        transcript = read_json(source_file, {})
+        transcript = read_json(enhanced, {})
         chunks = video_chunks(transcript)
-        if not chunks:
-            continue
+        if (chunks and transcript.get('model') == 'large-v3' and
+                (folder / 'transcript_hq.txt').is_file() and
+                (folder / 'transcript_hq.txt').stat().st_size > 3):
+            source_file = enhanced
+        else:
+            source_file = folder / 'transcript.json'
+            transcript = read_json(source_file, {})
+            chunks = video_chunks(transcript)
+            if not chunks:
+                continue
         video_count += 1
+        if source_file == enhanced:
+            hq_video_count += 1
+        else:
+            fallback_original_count += 1
+            fallback_video_ids.append(video_id)
         original_url = entry.get('url') or f'https://www.youtube.com/watch?v={video_id}'
         source_pages = entry.get('sources') or []
         frames = frames_for(folder, out)
@@ -185,6 +200,11 @@ def build(out: Path) -> dict:
         md_lines.extend(['', item['text'], ''])
     (ai / 'study_corpus.md').write_text('\n'.join(md_lines) + '\n', encoding='utf-8')
     stats = {'path_id': path_id, 'pages_with_text': page_count, 'videos_with_transcript': video_count,
+             'videos_in_manifest': len(videos) if isinstance(videos, list) else 0,
+             'hq_videos': hq_video_count,
+             'fallback_original_videos': fallback_original_count,
+             'fallback_original_video_ids': fallback_video_ids,
+             'hq_status': 'complete' if hq_video_count == len(videos) and videos else 'partial',
              'chunks': len(corpus), 'hq_video_chunks': sum(c['provenance']=='whisper_hq' for c in corpus),
              'note': 'La calidad de ASR no se valida automáticamente. Conservar referencias al material original.'}
     (ai / 'index.json').write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding='utf-8')
