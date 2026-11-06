@@ -5,7 +5,8 @@ cd /d "%~dp0"
 echo.
 echo === GOOGLE SKILLS PATH 16: DOCUMENTOS HTML Y LECCIONES ===
 echo Solo recursos incompletos. Conserva PDFs, videos HQ y avance.
-echo 24 documentos de un curso comparten index.html: se lee el iframe de cada leccion.
+echo Las lecciones HTML5 usan index.html#/lessons/ID: se conserva ese identificador.
+echo Se verifica data-lesson-id y se inventarian bloques visibles del reproductor Rise.
 echo Los quizzes no se inician ni se responden.
 echo Ninguna pagina se marcara completa solo por guardar capturas.
 echo.
@@ -27,6 +28,7 @@ if errorlevel 1 goto :error
 echo.
 echo [LISTO] Revisa export_pde\resource_coverage_report.json
 echo [LISTO] Biblioteca actual: export_pde\ai_library\latest_pack.json
+echo [LISTO] Consulta evidence_coverage.with_verified_lesson_mapping en el informe.
 pause
 exit /b 0
 :error

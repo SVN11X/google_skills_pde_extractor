@@ -148,3 +148,40 @@ originales se conservan. El paquete para IA se actualiza al finalizar.
 los recursos auxiliares de un curso HTML5, ni certifica haber recorrido todas
 las interacciones. Ningún resultado debe presentarse como extracción al 100 %
 sin un inventario de pantallas y verificación independiente.
+
+
+## Diagnóstico Rise: conservar la ruta de cada lección (6 noviembre 2026)
+
+Los documentos HTML5 de **Build Data Lakes and Data Warehouses on Google Cloud**
+usan un reproductor Articulate Rise. Cada página Google Skills tiene una URL
+`content/index.html#/lessons/<id>` distinta. La función general `norm_url()`
+del rastreador elimina fragmentos, por lo que los metadatos antiguos solo
+guardaban `content/index.html`. Este cambio **no modifica `norm_url()`**: toma
+la ruta de la lección que realmente está visible en el iframe de la página
+original y la utiliza únicamente en la recuperación selectiva.
+
+El extractor comprueba que el identificador de la URL coincida con
+`[data-lesson-id]` en el DOM renderizado. Guarda:
+
+- `rise_lesson_mapping.json` por página, sin cookies, firmas ni URL de sesión.
+- `lesson_route`, `lesson_id`, `lesson_title` y `visible_block_count` en
+  `resources_manifest.json` y `resource_coverage_report.json`.
+- `evidence_coverage.document.with_verified_lesson_mapping` y
+  `evidence_coverage.html_bundle.with_verified_lesson_mapping`.
+- Texto mostrado y capturas existentes, sin eliminar los originales.
+
+Solo abre una pestaña adicional para una lección Rise cuando dispone de una
+ruta con `#/lessons/<id>` y verifica que esa ruta cargó correctamente; nunca
+abre el índice genérico para mezclar otra lección. Tampoco pulsa «Next» en
+un reproductor Rise: podría pasar a otra lección. La captura sigue siendo
+**parcial** hasta que se demuestre la integridad de todas las interacciones.
+
+Para ejecutar en Windows:
+
+```powershell
+.\RECUPERAR_DOCUMENTOS_HTML_Y_LECCIONES_WINDOWS.bat
+$r = Get-Content .\export_pde\resource_coverage_report.json -Raw | ConvertFrom-Json
+$r.evidence_coverage | ConvertTo-Json -Depth 6
+```
+
+Los 41 quizzes continúan sin iniciarse ni contestarse automáticamente.
