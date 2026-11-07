@@ -11,7 +11,10 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
+import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -73,6 +76,60 @@ def is_safe_control(meta: dict, *, quiz_block: bool = False) -> bool:
     label = ' '.join(str(meta.get(k) or '') for k in ('label', 'title', 'text'))
     return not bool(FORBIDDEN_CONTROL.search(label) or
                     QUIZ_BLOCK.search(str(meta.get('class_hint') or '')))
+
+
+def needs_visual_repair(entry: dict) -> bool:
+    """Only revisit a Rise lesson when the existing log has unpictured states."""
+    if entry.get('kind') not in ('document', 'html_bundle'):
+        return False
+    if not entry.get('lesson_mapping_verified') or not entry.get('evidence_file'):
+        return False
+    return int(entry.get('states_captured') or 0) > int(entry.get('screenshots_saved') or 0)
+
+
+def replace_from_staging(out: Path, folder: Path, staging: Path,
+                         staged_result: dict) -> dict:
+    """Move a better staged capture into place; keep a full original backup."""
+    source = staging / 'rise_deep'
+    proof_path = source / 'lesson_blocks.json'
+    if not proof_path.is_file():
+        raise RuntimeError('Staged Rise evidence is incomplete')
+    destination = folder / 'rise_deep'
+    # Resolve links *before* replacing the original. An error at this stage
+    # must not affect prior lesson data.
+    proof = _load_json(proof_path)
+    if not isinstance(proof.get('blocks'), list):
+        raise RuntimeError('Staged Rise block inventory is invalid')
+    stage_relative = staging.relative_to(out) / 'rise_deep'
+    dest_relative = destination.relative_to(out)
+    for block in proof['blocks']:
+        for state in block.get('states', []):
+            if state.get('screenshot'):
+                state['screenshot'] = (
+                    dest_relative / Path(state['screenshot']).relative_to(stage_relative)
+                ).as_posix()
+    json_write(proof_path, proof)
+
+    backup = None
+    if destination.exists():
+        backups = folder / 'rise_deep_prev'
+        backups.mkdir(parents=True, exist_ok=True)
+        marker = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+        backup = backups / marker
+        destination.rename(backup)
+    try:
+        source.rename(destination)
+    except Exception:
+        if backup and backup.exists() and not destination.exists():
+            backup.rename(destination)
+        raise
+    result = dict(staged_result)
+    for key in ('content_file', 'evidence_file'):
+        if result.get(key):
+            relative = Path(result[key]).relative_to(staging.relative_to(out))
+            result[key] = (destination.relative_to(out) /
+                           relative.relative_to('rise_deep')).as_posix()
+    return result
 
 
 def normalize_visible_text(value: str) -> str:
@@ -249,6 +306,7 @@ def capture_lesson(frame, page, lesson_url: str, out: Path, folder: Path,
                 'Evidencia: texto y estados visibles; no constituye verificación de todas las interacciones.', '']
     seen_images, images = set(), []
     interactions, screenshots, states = 0, 0, 0
+    screenshot_failures, screenshot_cap_skips = 0, 0
     incomplete = []
     for block_id in ids:
         if not valid_lesson_match(route_id, rise_frame_metadata(frame).get('lesson_id')):
@@ -363,6 +421,12 @@ def capture_lesson(frame, page, lesson_url: str, out: Path, folder: Path,
                 if saved:
                     screenshots += 1
                     state['screenshot'] = file_path.relative_to(out).as_posix()
+                else:
+                    screenshot_failures += 1
+                    state['screenshot_status'] = 'failed'
+            else:
+                screenshot_cap_skips += 1
+                state['screenshot_status'] = 'limit_reached'
             record['states'].append(state)
             markdown.extend([f'### Estado visible: {name}', '', combined or '*(sin texto visible)*', ''])
             _close_reading_dialog(frame)
@@ -370,6 +434,10 @@ def capture_lesson(frame, page, lesson_url: str, out: Path, folder: Path,
         # Per-block checkpoint in case the browser closes before the next lesson.
         json_write(evidence_root / 'lesson_blocks.partial.json', {
             'lesson_id': route_id, 'blocks': collected, 'checkpoint_only': True})
+    if screenshot_cap_skips:
+        incomplete.append('screenshot_limit_reached')
+    if screenshot_failures:
+        incomplete.append('screenshot_capture_failed')
     image_stats = _save_training_images(page, images, evidence_root, max_images)
     for img in images:
         if img.get('local_image'):
@@ -384,7 +452,10 @@ def capture_lesson(frame, page, lesson_url: str, out: Path, folder: Path,
              'controls_detected': sum(b['controls_detected'] for b in collected),
              'controls_safe': sum(b['controls_safe'] for b in collected),
              'controls_activated': interactions, 'new_text_states': states,
-             'screenshots_saved': screenshots, 'visible_image_references': len(images),
+             'screenshots_saved': screenshots,
+             'screenshots_skipped_due_to_limit': screenshot_cap_skips,
+             'screenshots_failed': screenshot_failures,
+             'visible_image_references': len(images),
              **image_stats, 'blocks': collected, 'limitations': sorted(set(incomplete)),
              'verified_full_coverage': False,
              'note': 'Verificación de ruta Rise y observaciones visibles, no garantía de cobertura exhaustiva.'}
@@ -398,6 +469,8 @@ def capture_lesson(frame, page, lesson_url: str, out: Path, folder: Path,
             'blocks_visited': len(collected), 'blocks_detected': len(ids),
             'controls_activated': interactions, 'states_captured': states,
             'screenshots_saved': screenshots, 'images_saved': image_stats['images_saved'],
+            'screenshots_skipped_due_to_limit': screenshot_cap_skips,
+            'screenshots_failed': screenshot_failures,
             'verified_full_coverage': False}
 
 
@@ -466,7 +539,8 @@ def summarize(entries: dict) -> dict:
 
 def run(out: Path, profile_dir: str, *, only_url=None, kind='rise',
         limit=0, force=False, headless=False, delay=1.0,
-        max_controls=60, max_screenshots=12, max_images=24):
+        max_controls=60, max_screenshots=64, max_images=24,
+        repair_screenshots=False):
     out = out.resolve()
     if not (out / 'pages').is_dir():
         raise RuntimeError('No existe export_pde/pages; ejecutar la extracción base antes.')
@@ -479,6 +553,8 @@ def run(out: Path, profile_dir: str, *, only_url=None, kind='rise',
         return saved.get('resource_format') == 'embedded_html_course' or bool(
             training_html_urls(item['source_metadata'].get('links', [])))
     targets = [t for t in targets if (t['kind'] == 'quiz' if kind == 'quiz' else rise_target(t))]
+    if repair_screenshots and kind != 'rise':
+        raise ValueError('--repair-screenshots solo es compatible con --kind rise')
     if only_url:
         clean = sanitized_origin(only_url)
         if urlparse(clean).hostname != 'www.skills.google':
@@ -488,6 +564,13 @@ def run(out: Path, profile_dir: str, *, only_url=None, kind='rise',
             raise ValueError('El recurso no está presente en el inventario local del Path 16.')
     manifest_path = out / 'rise_deep_manifest.json'
     entries = _load_json(manifest_path)
+    if repair_screenshots:
+        targets = [t for t in targets if needs_visual_repair(entries.get(t['url'], {}))]
+        print(f'[AUDITORÍA] Reparación visual selectiva: {len(targets)} lecciones', flush=True)
+        if not targets:
+            summary = summarize(entries)
+            json_write(out / 'rise_deep_coverage_report.json', summary)
+            return summary
     if not targets:
         raise RuntimeError('No se encontraron lecciones Rise o cuestionarios en el inventario local.')
     try:
@@ -504,7 +587,7 @@ def run(out: Path, profile_dir: str, *, only_url=None, kind='rise',
             for i, target in enumerate(targets, 1):
                 url, folder = target['url'], target['folder']
                 previous = entries.get(url, {})
-                if (not force and previous.get('blocks_visited', 0) > 0 and
+                if (not force and not repair_screenshots and previous.get('blocks_visited', 0) > 0 and
                         previous.get('evidence_file') and
                         (out / previous['evidence_file']).is_file()):
                     print(f'[{i}/{len(targets)}] YA CAPTURADO: {url}', flush=True)
@@ -549,9 +632,30 @@ def run(out: Path, profile_dir: str, *, only_url=None, kind='rise',
                                 if frame is None:
                                     result['reason'] = 'rise_iframe_and_detached_route_unverified'
                                 else:
-                                    result.update(capture_lesson(frame, page, route, out, folder,
-                                        max_controls=max_controls, max_screenshots=max_screenshots,
-                                        max_images=max_images))
+                                    if repair_screenshots:
+                                        # Isolated staging avoids overwriting a good prior capture
+                                        # if an image fails or the live page changes between runs.
+                                        with tempfile.TemporaryDirectory(prefix='_rise_repair_', dir=folder) as temp:
+                                            stage = Path(temp)
+                                            fresh = capture_lesson(frame, page, route, out, stage,
+                                                max_controls=max_controls,
+                                                max_screenshots=max_screenshots,
+                                                max_images=max_images)
+                                            improved = (fresh.get('evidence_file') and
+                                                fresh.get('blocks_visited', 0) >= previous.get('blocks_visited', 0) and
+                                                fresh.get('states_captured', 0) >= previous.get('states_captured', 0) and
+                                                fresh.get('screenshots_saved', 0) > previous.get('screenshots_saved', 0) and
+                                                fresh.get('images_saved', 0) >= previous.get('images_saved', 0))
+                                            if improved:
+                                                result.update(replace_from_staging(out, folder, stage, fresh))
+                                            else:
+                                                result = dict(previous)
+                                                print('  [CONSERVADO] Nueva captura sin mejora verificable; '
+                                                      'se retiene la anterior.', flush=True)
+                                    else:
+                                        result.update(capture_lesson(frame, page, route, out, folder,
+                                            max_controls=max_controls, max_screenshots=max_screenshots,
+                                            max_images=max_images))
                                     print(f'  Rise: bloques={result.get("blocks_visited",0)} '
                                           f'estados nuevos={result.get("states_captured",0)} '
                                           f'controles={result.get("controls_activated",0)}', flush=True)
@@ -587,13 +691,16 @@ def main():
     ap.add_argument('--headless', action='store_true')
     ap.add_argument('--delay', type=float, default=1.0)
     ap.add_argument('--max-controls', type=int, default=60)
-    ap.add_argument('--max-screenshots', type=int, default=12)
+    ap.add_argument('--max-screenshots', type=int, default=64)
+    ap.add_argument('--repair-screenshots', action='store_true',
+                    help='Reintentar solo Rise con estados sin captura; respaldar original')
     ap.add_argument('--max-images', type=int, default=24)
     args = ap.parse_args()
     report = run(args.out, args.profile_dir, only_url=args.only_url, kind=args.kind,
                  limit=max(0,args.limit), force=args.force, headless=args.headless,
                  delay=max(0,args.delay), max_controls=max(0,args.max_controls),
-                 max_screenshots=max(0,args.max_screenshots), max_images=max(0,args.max_images))
+                 max_screenshots=max(0,args.max_screenshots), max_images=max(0,args.max_images),
+                 repair_screenshots=args.repair_screenshots)
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
 
 
