@@ -87,6 +87,61 @@ def needs_visual_repair(entry: dict) -> bool:
     return int(entry.get('states_captured') or 0) > int(entry.get('screenshots_saved') or 0)
 
 
+def repair_targets_from_manifest(out: Path, entries: dict, only_url: str | None = None) -> list[dict]:
+    """Select repair candidates in O(59) without opening the 982 page metadata files.
+
+    The manifest was created by the earlier authenticated extraction. It is not
+    trusted as a path or URL authority: revalidate both before opening a browser.
+    """
+    pages_root = (out / 'pages').resolve()
+    requested = None
+    if only_url:
+        requested = sanitized_origin(only_url)
+        if not re.fullmatch(
+            r'https://www\.skills\.google/paths/16/course_templates/\d+/'
+            r'(?:documents|html_bundles)/\d+', requested
+        ):
+            raise ValueError('La URL debe ser una lección Rise del Path 16 en www.skills.google')
+
+    targets = []
+    for url, entry in entries.items():
+        if not isinstance(url, str) or not isinstance(entry, dict):
+            continue
+        if requested and url != requested:
+            continue
+        if not needs_visual_repair(entry):
+            continue
+        # Prevent an edited/stale manifest from causing off-site navigation.
+        if sanitized_origin(url) != url:
+            continue
+        parsed = urlparse(url)
+        match = re.fullmatch(
+            r'/paths/16/course_templates/\d+/(documents|html_bundles)/\d+',
+            parsed.path,
+        )
+        if (parsed.scheme != 'https' or parsed.netloc != 'www.skills.google' or
+                parsed.query or parsed.fragment or not match):
+            continue
+        kind = 'document' if match.group(1) == 'documents' else 'html_bundle'
+        if entry.get('kind') != kind or entry.get('source_url', url) != url:
+            continue
+        # Do not use arbitrary evidence paths supplied by the JSON file.
+        expected_slug = '__'.join(parsed.path.strip('/').split('/'))
+        folder = pages_root / expected_slug
+        evidence_path = folder / 'rise_deep' / 'lesson_blocks.json'
+        try:
+            expected_rel = evidence_path.relative_to(out.resolve()).as_posix()
+        except ValueError:
+            continue
+        if str(entry.get('evidence_file', '')).replace('\\', '/') != expected_rel:
+            continue
+        if not evidence_path.is_file():
+            continue
+        targets.append({'url': url, 'kind': kind, 'folder': folder,
+                        'source_metadata': {}})
+    return sorted(targets, key=lambda item: item['url'])
+
+
 def replace_from_staging(out: Path, folder: Path, staging: Path,
                          staged_result: dict) -> dict:
     """Move a better staged capture into place; keep a full original backup."""
@@ -545,32 +600,49 @@ def run(out: Path, profile_dir: str, *, only_url=None, kind='rise',
     if not (out / 'pages').is_dir():
         raise RuntimeError('No existe export_pde/pages; ejecutar la extracción base antes.')
     all_resources = _load_json(out / 'resources_manifest.json')
-    targets = page_resources(out)
-    def rise_target(item):
-        if item['kind'] == 'html_bundle': return True
-        if item['kind'] != 'document': return False
-        saved = all_resources.get(item['url'], {})
-        return saved.get('resource_format') == 'embedded_html_course' or bool(
-            training_html_urls(item['source_metadata'].get('links', [])))
-    targets = [t for t in targets if (t['kind'] == 'quiz' if kind == 'quiz' else rise_target(t))]
-    if repair_screenshots and kind != 'rise':
-        raise ValueError('--repair-screenshots solo es compatible con --kind rise')
-    if only_url:
-        clean = sanitized_origin(only_url)
-        if urlparse(clean).hostname != 'www.skills.google':
-            raise ValueError('La URL debe pertenecer a www.skills.google')
-        targets = [t for t in targets if t['url'] == clean]
-        if not targets:
-            raise ValueError('El recurso no está presente en el inventario local del Path 16.')
     manifest_path = out / 'rise_deep_manifest.json'
     entries = _load_json(manifest_path)
+    if repair_screenshots and kind != 'rise':
+        raise ValueError('--repair-screenshots solo es compatible con --kind rise')
     if repair_screenshots:
-        targets = [t for t in targets if needs_visual_repair(entries.get(t['url'], {}))]
-        print(f'[AUDITORÍA] Reparación visual selectiva: {len(targets)} lecciones', flush=True)
+        # Fast path: select only the pending Rise lessons from the 59-entry
+        # manifest. Scanning all saved metadata can be very slow on Windows or
+        # when files live on a synced drive, and is not needed for repairs.
+        if not manifest_path.is_file() or not entries:
+            raise RuntimeError('Falta rise_deep_manifest.json; ejecuta la extracción profunda inicial.')
+        targets = repair_targets_from_manifest(out, entries, only_url=only_url)
+        pending = sum(needs_visual_repair(entry) and
+                      (not only_url or url == sanitized_origin(only_url))
+                      for url, entry in entries.items() if isinstance(entry, dict))
+        print(f'[AUDITORÍA] Reparación visual selectiva: {len(targets)} de '
+              f'{pending} lecciones pendientes '
+              '(sin recorrer metadatos de todas las páginas)', flush=True)
+        if pending > len(targets):
+            print(f'[ADVERTENCIA] {pending - len(targets)} lecciones sin archivo de evidencia '
+                  'válido; quedan pendientes y no se sobrescriben.', flush=True)
+        if pending and not targets:
+            raise RuntimeError('Hay lecciones pendientes, pero no se encontraron sus '
+                               'lesson_blocks.json válidos. Revisa export_pde/pages.')
         if not targets:
             summary = summarize(entries)
             json_write(out / 'rise_deep_coverage_report.json', summary)
             return summary
+    else:
+        targets = page_resources(out)
+        def rise_target(item):
+            if item['kind'] == 'html_bundle': return True
+            if item['kind'] != 'document': return False
+            saved = all_resources.get(item['url'], {})
+            return saved.get('resource_format') == 'embedded_html_course' or bool(
+                training_html_urls(item['source_metadata'].get('links', [])))
+        targets = [t for t in targets if (t['kind'] == 'quiz' if kind == 'quiz' else rise_target(t))]
+        if only_url:
+            clean = sanitized_origin(only_url)
+            if urlparse(clean).hostname != 'www.skills.google':
+                raise ValueError('La URL debe pertenecer a www.skills.google')
+            targets = [t for t in targets if t['url'] == clean]
+            if not targets:
+                raise ValueError('El recurso no está presente en el inventario local del Path 16.')
     if not targets:
         raise RuntimeError('No se encontraron lecciones Rise o cuestionarios en el inventario local.')
     try:

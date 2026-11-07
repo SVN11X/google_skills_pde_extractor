@@ -6,6 +6,7 @@ echo.
 echo === PATH 16: AUDITORIA Y REPARACION SELECTIVA DE CAPTURAS RISE ===
 echo NO inicia quizzes, NO elimina evidencia, NO re-transcribe videos.
 echo Revisa solo las lecciones con mas estados que capturas disponibles.
+echo Usa el manifiesto de Rise: no relee los metadatos de las 982 paginas.
 echo Los originales se conservan en rise_deep_prev si la nueva captura mejora.
 echo.
 if not exist ".venv\Scripts\python.exe" (
